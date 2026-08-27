@@ -32,6 +32,13 @@ const api = {
     ipcRenderer.invoke('profiles:update', profile),
   deleteProfile: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('profiles:delete', id),
+  // 首页列表排序：同协议类别内把 fromId 移到 toId 位置
+  reorderProfiles: (
+    protocol: string,
+    fromId: string,
+    toId: string
+  ): Promise<ConnectionProfile[]> =>
+    ipcRenderer.invoke('profiles:reorder', protocol, fromId, toId),
 
   // ---------- 会话 ----------
   createSession: (profile: ConnectionProfile): Promise<SessionInfo> =>
@@ -138,6 +145,30 @@ const api = {
   ): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('ssh:upload', id, remotePath, localPath),
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+
+  // ---------- 窗口控制（自定义标题栏） ----------
+  minimizeWindow: (): void => ipcRenderer.send('window:minimize'),
+  toggleMaximizeWindow: (): void => ipcRenderer.send('window:toggle-maximize'),
+  closeWindow: (): void => ipcRenderer.send('window:close'),
+  isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:is-maximized'),
+  onMaximized: (cb: (maximized: boolean) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, maximized: boolean): void => cb(maximized)
+    ipcRenderer.on('window:maximized', listener)
+    return () => {
+      ipcRenderer.removeListener('window:maximized', listener)
+    }
+  },
+  // 全屏（会话页面全屏：BrowserWindow 真全屏）
+  setFullScreen: (fullscreen: boolean): void =>
+    ipcRenderer.send('window:set-fullscreen', fullscreen),
+  isFullScreen: (): Promise<boolean> => ipcRenderer.invoke('window:is-fullscreen'),
+  onFullScreen: (cb: (fullscreen: boolean) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, fullscreen: boolean): void => cb(fullscreen)
+    ipcRenderer.on('window:fullscreen', listener)
+    return () => {
+      ipcRenderer.removeListener('window:fullscreen', listener)
+    }
+  },
 
   // ---------- 多窗口：tab 分离 / 合并 ----------
   registerWindow: (): void => ipcRenderer.send('window:register'),

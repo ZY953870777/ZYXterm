@@ -5,10 +5,7 @@ import { PROTOCOLS } from './protocols'
 interface Props {
   tabs: Tab[]
   activeId: string | null
-  /** 是否处于首页（固定 tab，不可拖拽/关闭） */
-  activeIsHome: boolean
   onSelect: (id: string) => void
-  onSelectHome: () => void
   onClose: (id: string) => void
   onAdd: () => void
   onReconnect: (tab: Tab) => void
@@ -55,9 +52,7 @@ interface DragState {
 export default function SessionTabs({
   tabs,
   activeId,
-  activeIsHome,
   onSelect,
-  onSelectHome,
   onClose,
   onAdd,
   onReconnect,
@@ -165,14 +160,6 @@ export default function SessionTabs({
 
   return (
     <div className="tabs">
-      {/* 固定首页 tab：不可拖拽、不可关闭 */}
-      <div
-        className={`tab tab-home ${activeIsHome ? 'active' : ''}`}
-        onClick={onSelectHome}
-        title="首页"
-      >
-        <span className="proto-badge home">⌂</span>
-      </div>
       {tabs.map((t, i) => {
         const statusText = STATUS_TEXT[t.status] ?? t.status
         const protoLabel = PROTOCOLS.find((p) => p.key === t.protocol)?.label ?? t.protocol

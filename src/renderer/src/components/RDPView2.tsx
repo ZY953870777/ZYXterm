@@ -15,7 +15,10 @@ const PTR_WHEEL = 0x0200
 const PTR_WHEEL_NEGATIVE = 0x0100
 const WHEEL_ROTATION = 0x78 // 120：标准一个滚轮刻度
 
-// DOM code → RDP Set1 扫描码
+// RDP Set1 扫描码。扩展键（方向键/编辑键/小键盘 Enter、/ 等）必须带
+// KBD_FLAGS_EXTENDED(0x100) 标记，否则与同值的小键盘键冲突：
+// 如 ArrowUp=0x48 与 Numpad8=0x48 相同，不带标记按↑会被当作小键盘 8 输出。
+const KBD_EXTENDED = 0x100
 const CODE_TO_SCAN: Record<string, number> = {
   Escape: 0x01, Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05,
   Digit5: 0x06, Digit6: 0x07, Digit7: 0x08, Digit8: 0x09, Digit9: 0x0a,
@@ -30,8 +33,21 @@ const CODE_TO_SCAN: Record<string, number> = {
   ShiftRight: 0x36, NumpadMultiply: 0x37, AltLeft: 0x38, Space: 0x39,
   CapsLock: 0x3a, F1: 0x3b, F2: 0x3c, F3: 0x3d, F4: 0x3e, F5: 0x3f, F6: 0x40,
   F7: 0x41, F8: 0x42, F9: 0x43, F10: 0x44, F11: 0x45, F12: 0x46,
-  Home: 0x47, ArrowUp: 0x48, PageUp: 0x49, ArrowLeft: 0x4b, ArrowRight: 0x4d,
-  End: 0x4f, ArrowDown: 0x50, PageDown: 0x51, Insert: 0x52, Delete: 0x53
+  // 小键盘数字（无 E0 前缀）
+  Numpad7: 0x47, Numpad8: 0x48, Numpad9: 0x49, NumpadSubtract: 0x4a,
+  Numpad4: 0x4b, Numpad5: 0x4c, Numpad6: 0x4d, NumpadAdd: 0x4e,
+  Numpad1: 0x4f, Numpad2: 0x50, Numpad3: 0x51, Numpad0: 0x52,
+  NumpadDecimal: 0x53, NumpadSeparator: 0x4c,
+  // 扩展键（E0 前缀，带 KBD_FLAGS_EXTENDED 标记）
+  Home: KBD_EXTENDED | 0x47, ArrowUp: KBD_EXTENDED | 0x48,
+  PageUp: KBD_EXTENDED | 0x49, ArrowLeft: KBD_EXTENDED | 0x4b,
+  ArrowRight: KBD_EXTENDED | 0x4d, End: KBD_EXTENDED | 0x4f,
+  ArrowDown: KBD_EXTENDED | 0x50, PageDown: KBD_EXTENDED | 0x51,
+  Insert: KBD_EXTENDED | 0x52, Delete: KBD_EXTENDED | 0x53,
+  NumpadEnter: KBD_EXTENDED | 0x1c, NumpadDivide: KBD_EXTENDED | 0x35,
+  ControlRight: KBD_EXTENDED | 0x1d, AltRight: KBD_EXTENDED | 0x38,
+  MetaLeft: KBD_EXTENDED | 0x5b, MetaRight: KBD_EXTENDED | 0x5c,
+  ContextMenu: KBD_EXTENDED | 0x5d
 }
 
 /**

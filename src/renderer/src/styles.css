@@ -48,10 +48,83 @@ button {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  /* 建立层叠上下文 + 纵向 flex：标题栏 38px + 主区 flex:1（= 视口高 - 38px），
+     彻底避免 .main height:100% 溢出导致 content 定位异常、session-pane 覆盖标题栏 */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ============ 自定义标题栏（应用名 + 标签栏 + 窗口控制按钮合一） ============ */
+/* 非 macOS 窗口 frame:false，标题栏与标签栏合并为一行；整行可拖动窗口，
+   标签/按钮为 no-drag 可交互（-webkit-app-region 由子元素覆盖继承） */
+.titlebar {
+  display: flex;
+  align-items: stretch;
+  height: 38px;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  user-select: none;
+  /* 相对定位 + 中间层 z-index：确保页面内容无法覆盖标题栏；
+     低于对话框遮罩(100)/右键菜单(150)，模态层仍可盖住 */
+  position: relative;
+  z-index: 60;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 16px 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.5px;
+  /* 软件名即「首页」入口：no-drag 才能响应点击（drag 区域不接收鼠标事件） */
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.titlebar-brand:hover {
+  color: var(--accent);
+}
+
+/* 窗口控制按钮组（最小化 / 最大化·还原 / 关闭） */
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.win-btn {
+  width: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-dim);
+  cursor: default;
+  outline: none;
+}
+
+.win-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.win-btn.win-close:hover {
+  background: #e81123;
+  color: #fff;
 }
 
 .main {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -72,6 +145,81 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* ============ 会话页面全屏（HTML5 Fullscreen） ============ */
+/* 全屏容器：占满会话面板；全屏时以 fixed 覆盖整个窗口（含标题栏/标签栏） */
+.fs-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+/* 让子会话视图撑满容器 */
+.fs-wrap > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 全屏：由 App 全局状态隐藏标题栏/标签栏（.app-fullscreen），
+   页面（.main/.content/session-pane）自然铺满整个窗口。
+   不再用 fs-wrap fixed 覆盖，避免状态偏差把标签栏盖住导致“消失” */
+.app.app-fullscreen .titlebar {
+  display: none;
+}
+
+/* 顶部透明触发条：仅页面顶部中央区域（水平中间约 30%）进入时显示操作条 */
+.fs-trigger {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 30%;
+  height: 14px;
+  z-index: 5;
+}
+
+/* 顶部浮出的操作条：absolute 相对 .fs-wrap 定位（显示在页面顶部，
+   而非视口顶部的标签栏；全屏时 fs-wrap 铺满窗口，同样落在屏幕顶部） */
+.fs-bar {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  background: rgba(20, 22, 34, 0.88);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.fs-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.fs-btn:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
 }
 
 /* 首页 pane：覆盖在会话 pane 之上；会话 pane 保持挂载以保留画面 */
@@ -154,6 +302,16 @@ button {
   background: var(--bg-hover);
 }
 
+/* 首页列表拖动排序 */
+.profile-item.dragging {
+  opacity: 0.5;
+}
+
+.profile-item.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 .profile-name {
   flex: 1;
   overflow: hidden;
@@ -228,6 +386,14 @@ button {
   align-items: stretch;
 }
 
+/* 标题栏内标签栏：占满剩余宽度，去掉独立下边框（由 .titlebar 统一提供） */
+.titlebar .tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  border-bottom: none;
+}
+
 .tabs::-webkit-scrollbar {
   height: 4px;
 }
@@ -246,6 +412,7 @@ button {
   color: var(--text-dim);
   white-space: nowrap;
   max-width: 220px;
+  -webkit-app-region: no-drag; /* 标题栏内标签可交互（点击/拖拽排序/分离），不拖动窗口 */
 }
 
 .tab:hover {
@@ -399,6 +566,12 @@ button {
   overflow: hidden;
 }
 
+/* 类别列拖动放置高亮 */
+.grid-col.drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(122, 162, 247, 0.25);
+}
+
 .col-header {
   display: flex;
   align-items: center;
@@ -406,6 +579,11 @@ button {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-sidebar);
+  cursor: grab;
+}
+
+.col-header:active {
+  cursor: grabbing;
 }
 
 .col-desc {
@@ -461,6 +639,7 @@ button {
   cursor: pointer;
   padding: 0 14px;
   line-height: 1;
+  -webkit-app-region: no-drag; /* 标题栏内「+」按钮可点击，不拖动窗口 */
 }
 
 .tab-add:hover {

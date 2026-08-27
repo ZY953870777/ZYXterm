@@ -187,8 +187,23 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
       }
     })
 
+    // 密码输入检测：SSH 中执行 sudo/su 等时 shell 提示输入密码，避免把密码
+    // 误记录进命令历史/补全（安全）。检测输出中的密码提示符；出现普通提示符
+    // （$ # >）时复位。
+    let passwordModeRef = false
+    const detectPasswordPrompt = (d: string): void => {
+      const lower = d.toLowerCase()
+      if (/password\s*:|passphrase\s*:|password for/i.test(lower)) {
+        passwordModeRef = true
+      } else if (/[\$#>]\s*$/.test(d)) {
+        passwordModeRef = false
+      }
+    }
     const unsubData = window.api.onTerminalData((id, data) => {
-      if (id === sessionIdRef.current) term.write(data)
+      if (id === sessionIdRef.current) {
+        term.write(data)
+        detectPasswordPrompt(data)
+      }
     })
 
     const onDataDisposable = term.onData((data) => {
@@ -198,15 +213,24 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
         return
       }
 
-      // 回车：有补全候选则选择执行，否则提交
+      // 回车：密码输入模式下只发送回车（不提交历史/补全，避免记录密码）
       if (data === '\r') {
+        if (passwordModeRef) {
+          inputRef.current = ''
+          window.api.terminalWrite(sid, data)
+          return
+        }
         const cands = completionRef.current
         if (cands.length > 0) {
-          applyCompletion(cands[completionIdxRef.current] ?? cands[0], true)
-        } else {
-          submitCurrentCommand()
-          window.api.terminalWrite(sid, data)
+          // 回车：把上下键/鼠标选中的命令补全到输入框（不执行）。
+          // applyText 会把 inputRef 置为补全命令，用户可继续编辑或再次回车执行；
+          // 因此这里不再清空 inputRef、不发送回车，保证“补全后能继续键盘输入”。
+          applyCompletion(cands[completionIdxRef.current] ?? cands[0], false)
+          setCompletionIdx(0)
+          return
         }
+        submitCurrentCommand()
+        window.api.terminalWrite(sid, data)
         inputRef.current = ''
         setCompletion([])
         setCompletionIdx(0)
@@ -235,15 +259,20 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
       }
       // 退格
       if (data === '\x7f') {
-        inputRef.current = inputRef.current.slice(0, -1)
-        updateCompletion(inputRef.current)
+        if (!passwordModeRef) {
+          inputRef.current = inputRef.current.slice(0, -1)
+          updateCompletion(inputRef.current)
+        }
         window.api.terminalWrite(sid, data)
         return
       }
-      // 可见字符（含多字符粘贴）；排除控制字符/转义序列（如 \x1b...）
+      // 可见字符（含多字符粘贴）；排除控制字符/转义序列（如 \x1b...）。
+      // 密码输入模式下不更新本地输入/补全（仅发送，避免密码进历史）
       if (data && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 127) {
-        inputRef.current += data
-        updateCompletion(inputRef.current)
+        if (!passwordModeRef) {
+          inputRef.current += data
+          updateCompletion(inputRef.current)
+        }
       }
       window.api.terminalWrite(sid, data)
     })
@@ -300,8 +329,10 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
   const submitCommand = useCallback((cmd: string) => {
     const c = cmd.trim()
     if (!c) return
+    // 保留所有历史（不去重）：重复命令也逐条记录，避免“单击跳转到执行位置”因
+    // 合并而错位/混乱
     setHistory((prev) => {
-      const next = [c, ...prev.filter((h) => h !== c)].slice(0, 200)
+      const next = [c, ...prev].slice(0, 200)
       historyRef.current = next
       return next
     })
@@ -357,16 +388,26 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
       setCompletion([])
       return
     }
-    const matches = historyRef.current
-      .filter((h) => h.startsWith(input) && h !== input)
-      .slice(0, 8)
+    // 候选去重（历史含重复命令时避免下拉出现重复项）
+    const matches = Array.from(
+      new Set(
+        historyRef.current.filter((h) => h.startsWith(input) && h !== input)
+      )
+    ).slice(0, 8)
     completionRef.current = matches
     setCompletion(matches)
     setCompletionIdx(0)
     completionIdxRef.current = 0
-    if (matches.length > 0 && containerRef.current) {
-      const r = containerRef.current.getBoundingClientRect()
-      setCompletionPos({ x: r.left + 8, y: r.top + 8 })
+    if (matches.length > 0) {
+      // 定位到当前输入光标下方：xterm 的隐藏 textarea 跟随光标，其屏幕坐标即
+      // 光标位置；避免补全下拉固定在左上角遮挡输入（导致空格等输入“无效”）
+      const ta = termRef.current?.element?.querySelector<HTMLElement>(
+        '.xterm-helper-textarea'
+      )
+      const r = ta?.getBoundingClientRect()
+      if (r) {
+        setCompletionPos({ x: r.left, y: r.bottom + 4 })
+      }
     }
   }, [])
 

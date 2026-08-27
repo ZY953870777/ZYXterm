@@ -8,7 +8,12 @@ import { getSerialPortModule } from './serialport-loader'
 import { ProfileStore } from './store'
 import { checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { WindowManager } from './window-manager'
-import { ConnectionProfile, NewProfileInput, SerialPortInfo } from '@shared/types'
+import {
+  ConnectionProfile,
+  NewProfileInput,
+  ProtocolType,
+  SerialPortInfo
+} from '@shared/types'
 
 /** 注册所有 IPC 处理器 */
 export function registerIpc(
@@ -64,6 +69,29 @@ export function registerIpc(
     store.save(store.load().filter((p) => p.id !== id))
     return true
   })
+
+  // 首页列表排序：同协议类别内将 fromId 移动到 toId 位置（落在目标项之前），
+  // 持久化到配置文件并返回新的 profiles 数组。
+  ipcMain.handle(
+    'profiles:reorder',
+    (_e, protocol: ProtocolType, fromId: string, toId: string) => {
+      const profiles = store.load()
+      const idxs = profiles
+        .map((p, i) => (p.protocol === protocol ? i : -1))
+        .filter((i) => i >= 0)
+      const items = idxs.map((i) => profiles[i])
+      const fi = items.findIndex((p) => p.id === fromId)
+      if (fi < 0) return profiles
+      const insertAt = items.findIndex((p) => p.id === toId)
+      if (insertAt < 0 || insertAt === fi) return profiles
+      const next = items.filter((p) => p.id !== fromId)
+      // fromId 原在 toId 之后时，toId 在新数组中的位置不变；之前时需按移除后索引插入
+      next.splice(insertAt, 0, items[fi])
+      for (let k = 0; k < idxs.length; k++) profiles[idxs[k]] = next[k]
+      store.save(profiles)
+      return profiles
+    }
+  )
 
   // ---------- 会话管理 ----------
   ipcMain.handle('session:create', (_e, profile: ConnectionProfile) =>
@@ -189,6 +217,38 @@ export function registerIpc(
       }
     }
   )
+
+  // ---------- 窗口控制（自定义标题栏：最小化/最大化/关闭） ----------
+  const winFromEvent = (e: { sender: Electron.WebContents }): BrowserWindow | null =>
+    BrowserWindow.fromWebContents(e.sender)
+  ipcMain.on('window:minimize', (e) => {
+    winFromEvent(e)?.minimize()
+  })
+  ipcMain.on('window:toggle-maximize', (e) => {
+    const win = winFromEvent(e)
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  ipcMain.on('window:close', (e) => {
+    winFromEvent(e)?.close()
+  })
+  ipcMain.handle('window:is-maximized', (e) => {
+    return winFromEvent(e)?.isMaximized() ?? false
+  })
+
+  // 全屏（会话页面全屏：BrowserWindow 真全屏，铺满整个显示器屏幕）
+  ipcMain.on('window:set-fullscreen', (e, fullscreen: boolean) => {
+    const win = winFromEvent(e)
+    if (!win) return
+    win.setFullScreen(!!fullscreen)
+    // 乐观广播：不依赖 fullscreen 事件/isFullScreen()，确保渲染端状态即时准确，
+    // 避免 isFullScreen() 残留误报导致标题栏被误隐藏
+    if (!win.isDestroyed()) win.webContents.send('window:fullscreen', !!fullscreen)
+  })
+  ipcMain.handle('window:is-fullscreen', (e) => {
+    return winFromEvent(e)?.isFullScreen() ?? false
+  })
 
   // ---------- 多窗口：tab 分离 / 合并 ----------
   // renderer 启动注册窗口（首个注册窗口为主窗口）

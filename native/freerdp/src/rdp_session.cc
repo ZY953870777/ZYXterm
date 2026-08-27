@@ -43,6 +43,9 @@
 #ifndef KBD_FLAGS_RELEASE
 #define KBD_FLAGS_RELEASE 0x4000
 #endif
+#ifndef KBD_FLAGS_EXTENDED
+#define KBD_FLAGS_EXTENDED 0x0100
+#endif
 
 using namespace Napi;
 
@@ -531,9 +534,15 @@ class RdpSession : public Napi::ObjectWrap<RdpSession> {
     bool pressed = info[1].As<Napi::Boolean>().Value();
     rdpInput* input = Input();
     if (input) {
-      // FreeRDP 3：keyboard_event_ex(input, down, repeat, rdp_scancode)
-      freerdp_input_send_keyboard_event_ex(input, pressed ? TRUE : FALSE, FALSE,
-                                           (UINT32)scancode);
+      // scancode 高位带 KBD_FLAGS_EXTENDED(0x100) 标记扩展键（方向键/编辑键/
+      // 小键盘 Enter、/ 等），需将其剥离并写入键盘 flags，否则会与同值的
+      // 小键盘键混淆（如 ArrowUp=0x48 vs Numpad8=0x48）。
+      UINT32 flags = pressed ? 0 : KBD_FLAGS_RELEASE;
+      if (scancode & KBD_FLAGS_EXTENDED) {
+        flags |= KBD_FLAGS_EXTENDED;
+        scancode &= ~KBD_FLAGS_EXTENDED;
+      }
+      freerdp_input_send_keyboard_event(input, (UINT16)flags, (UINT16)scancode);
     }
     return env.Undefined();
   }

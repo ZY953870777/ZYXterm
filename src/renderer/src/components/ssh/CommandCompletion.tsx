@@ -13,7 +13,7 @@ export default function CommandCompletion({ items, index, x, y, onSelect }: Prop
     <div className="cmd-completion" style={{ left: x, top: y }}>
       {items.map((it, i) => (
         <div
-          key={it}
+          key={`${i}-${it}`}
           className={`cmd-completion-item ${i === index ? 'selected' : ''}`}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => onSelect(it, false)}

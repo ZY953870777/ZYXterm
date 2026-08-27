@@ -37,6 +37,12 @@ export class WindowManager {
   createWindow(opts: { isMain?: boolean; profile?: ConnectionProfile; sessionId?: string } = {}): BrowserWindow {
     // 应用图标（开发/运行时窗口图标；打包后 exe 自带图标，build/icon.png 不存在时跳过）
     const iconPath = join(process.cwd(), 'build', 'icon.png')
+    // 自定义标题栏：非 macOS 隐藏系统边框与按钮（frame:false），标题栏与标签栏
+    // 合一由渲染进程绘制（应用名 + 标签 + 窗口控制按钮）；macOS 保留原生红绿灯。
+    const customTitlebar =
+      process.platform === 'darwin'
+        ? { titleBarStyle: 'hiddenInset' as const }
+        : { frame: false as const }
     const win = new BrowserWindow({
       width: 1280,
       height: 820,
@@ -46,6 +52,7 @@ export class WindowManager {
       autoHideMenuBar: true,
       backgroundColor: '#1a1b26',
       title: 'ZYXterm',
+      ...customTitlebar,
       ...(existsSync(iconPath) ? { icon: iconPath } : {}),
       webPreferences: {
         preload: join(__dirname, '../preload/index.js'),
@@ -54,6 +61,31 @@ export class WindowManager {
         nodeIntegration: false
       }
     })
+
+    // 启动时强制非全屏：清除可能残留的全屏状态（如早期版本 HTML5 fullscreen
+    // 退出后 isFullScreen() 未复位），避免渲染端 appFullscreen 误判导致标题栏被隐藏
+    win.setFullScreen(false)
+
+    // 最大化状态变化 → 通知渲染进程（切换 最大化/还原 按钮图标）
+    win.on('maximize', () => {
+      if (!win.isDestroyed()) win.webContents.send('window:maximized', true)
+    })
+    win.on('unmaximize', () => {
+      if (!win.isDestroyed()) win.webContents.send('window:maximized', false)
+    })
+
+    // 全屏状态变化（Windows/Linux 的 'fullscreen' 事件在部分 TS 类型中缺失，
+    // 用 as never 绕过类型；且事件回调签名各版本不一，不信任其参数，
+    // 一律用 win.isFullScreen() 实测当前状态，避免退出全屏时误报 true
+    // 导致渲染端 fs-wrap 卡在 fixed 覆盖（标题栏/标签栏消失））
+    const broadcastFullscreen = (fullscreen: boolean): void => {
+      if (!win.isDestroyed()) win.webContents.send('window:fullscreen', fullscreen)
+    }
+    win.on('fullscreen' as never, () => {
+      if (!win.isDestroyed()) broadcastFullscreen(win.isFullScreen())
+    })
+    win.on('enter-full-screen', () => broadcastFullscreen(true))
+    win.on('leave-full-screen', () => broadcastFullscreen(false))
 
     win.webContents.setWindowOpenHandler((details) => {
       shell.openExternal(details.url)

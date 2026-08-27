@@ -1,6 +1,6 @@
 {
   "name": "zyxterm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "基于 Electron + React + TypeScript 的桌面终端：支持 SSH / 串口 / VNC / RDP 协议",
   "main": "./out/main/index.js",
   "author": "ZhaoYang <953870777@qq.com>",
