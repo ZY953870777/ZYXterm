@@ -1,0 +1,41 @@
+# ============ 依赖 / 构建产物 ============
+node_modules
+dist
+out
+.vite
+*.tsbuildinfo
+docker-cache
+ZYXterm
+
+# ============ FreeRDP 运行库 / 二进制 / addon 产物 ============
+# DLL + freerdp.node 等大文件不入库：由 GitHub workflow 编译后放入，
+# 或从 freerdp-win64 下载后放这里
+resources/freerdp/*
+!resources/freerdp/.gitkeep
+native/freerdp/build/
+native/freerdp/third_party/
+*.node
+
+# ============ 本地数据 / 配置 / 密钥（绝不入库） ============
+*.log
+connections.json
+*.local
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+secrets.json
+*.tmp
+tmp/
+
+# ============ 本地工具脚本（仅本地使用，不入库） ============
+build-docker.sh
+sync-to-server.sh
+
+# ============ 系统 / 编辑器 ============
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
