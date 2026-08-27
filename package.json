@@ -1,0 +1,116 @@
+{
+  "name": "zyxterm",
+  "version": "0.1.0",
+  "description": "MobaXterm 风格的桌面终端：支持 SSH / 串口 / VNC / RDP 协议",
+  "main": "./out/main/index.js",
+  "author": "ZhaoYang <953870777@qq.com>",
+  "homepage": "https://github.com/ZY953870777/ZYXterm",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/run-vite.cjs dev",
+    "build": "node scripts/run-vite.cjs build",
+    "start": "node scripts/run-vite.cjs preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "postinstall": "node scripts/rebuild-native.cjs",
+    "dist": "node scripts/run-vite.cjs build && electron-builder",
+    "dist:win": "node scripts/run-vite.cjs build && electron-builder --win",
+    "dist:dir": "node scripts/run-vite.cjs build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.zyxterm.app",
+    "productName": "ZYXterm",
+    "icon": "build/icon.png",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "resources/freerdp",
+        "to": "freerdp",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "src/main/rdp-worker.cjs",
+        "to": "rdp-worker.cjs"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ZYXterm-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ZY953870777",
+        "repo": "ZYXterm"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@types/guacamole-common-js": "^1.5.5",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@types/ssh2": "^1.15.5",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "electron-updater": "^6.8.9",
+    "guacamole-common-js": "^1.5.0",
+    "node-addon-api": "^8.9.2",
+    "node-gyp": "^13.0.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "serialport": "^13.0.0",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.3",
+    "xterm": "^5.3.0"
+  }
+}

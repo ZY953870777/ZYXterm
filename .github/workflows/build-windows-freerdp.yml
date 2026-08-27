@@ -1,0 +1,421 @@
+name: Build FreeRDP Windows x64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-freerdp:
+    runs-on: windows-2022
+
+    env:
+      # 3.23.0 在 Windows 连接时崩溃（freerdp_connect 内 0xc0000005）；
+      # 升级到 3.30.0（与 Linux 系统版本一致，已验证可正常连接）
+      FREERDP_VERSION: "3.30.0"
+      VCPKG_DEFAULT_TRIPLET: "x64-windows"
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Setup MSVC
+      # ============================================================
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+
+      # ============================================================
+      # 3. Setup CMake
+      # ============================================================
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+
+      # ============================================================
+      # 4. Check environment
+      # ============================================================
+
+      - name: Check environment
+        shell: pwsh
+        run: |
+          Write-Host "================ MSVC ================"
+          cl
+
+          Write-Host ""
+          Write-Host "================ CMake ================"
+          cmake --version
+
+          Write-Host ""
+          Write-Host "================ vcpkg ================"
+          vcpkg version
+
+
+      # ============================================================
+      # 5. Install dependencies
+      # ============================================================
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          vcpkg install `
+            zlib:x64-windows `
+            openssl:x64-windows `
+            libusb:x64-windows
+
+          vcpkg list
+
+
+      # ============================================================
+      # 6. Clone FreeRDP
+      # ============================================================
+
+      - name: Clone FreeRDP
+        shell: pwsh
+        run: |
+
+          git clone `
+            --depth 1 `
+            --branch $env:FREERDP_VERSION `
+            https://github.com/FreeRDP/FreeRDP.git `
+            freerdp-src
+
+          Write-Host ""
+          Write-Host "FreeRDP revision:"
+          git -C freerdp-src rev-parse HEAD
+
+      - name: Inspect URBDRC options
+        shell: pwsh
+        run: |
+          Write-Host "================ URBDRC CMake options ================"
+
+          Get-ChildItem freerdp-src -Recurse -Include *.cmake,CMakeLists.txt |
+            Select-String -Pattern "URBDRC|LIBUSB_1" |
+            ForEach-Object {
+              Write-Host "$($_.Path):$($_.LineNumber): $($_.Line)"
+            }
+
+      # ============================================================
+      # 7. Configure
+      # ============================================================
+      - name: Configure FreeRDP
+        shell: pwsh
+        run: |
+          $cmakeArgs = @(
+            "-S", "freerdp-src"
+            "-B", "build"
+            "-G", "Visual Studio 17 2022"
+            "-A", "x64"
+
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+            "-DVCPKG_TARGET_TRIPLET=x64-windows"
+
+            "-DWITH_FFMPEG=OFF"
+            "-DWITH_DSP_FFMPEG=OFF"
+            "-DWITH_VIDEO_FFMPEG=OFF"
+
+            "-DWITH_SWSCALE=OFF"
+            "-DWITH_CAIRO=OFF"
+            "-DWITH_OPUS=OFF"
+            "-DWITH_OPENH264=OFF"
+            "-DWITH_GSM=OFF"
+            "-DWITH_LAME=OFF"
+            "-DWITH_FAAD2=OFF"
+            "-DWITH_FAAC=OFF"
+            "-DWITH_FDK_AAC=OFF"
+            "-DWITH_SOXR=OFF"
+
+            "-DWITH_WAYLAND=OFF"
+            "-DWITH_X11=OFF"
+            "-DWITH_PULSE=OFF"
+            "-DWITH_ALSA=OFF"
+            "-DWITH_PCSC=OFF"
+
+            "-DWITH_SERVER=OFF"
+            "-DWITH_SHADOW=OFF"
+            "-DWITH_PROXY=OFF"
+
+            "-DWITH_CLIENT=ON"
+            "-DWITH_OPENSSL=ON"
+            "-DWITH_ZLIB=ON"
+
+            "-DCMAKE_BUILD_TYPE=Release"
+          )
+
+          cmake @cmakeArgs
+
+
+      # ============================================================
+      # 8. Build
+      # ============================================================
+
+      - name: Build FreeRDP
+        shell: pwsh
+        run: |
+
+          cmake `
+            --build build `
+            --config Release `
+            --parallel
+
+
+      # ============================================================
+      # 9. Inspect build output
+      # ============================================================
+
+      - name: Inspect build output
+        shell: pwsh
+        run: |
+
+          Write-Host ""
+          Write-Host "================ DLL / LIB / EXE ================"
+
+          Get-ChildItem `
+            build `
+            -Recurse `
+            -Include *.dll,*.lib,*.exe |
+          Select-Object FullName
+
+
+      # ============================================================
+      # 10. Prepare runtime package
+      # ============================================================
+
+      - name: Package FreeRDP
+        shell: pwsh
+        run: |
+
+          $package = "package/freerdp"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $package |
+            Out-Null
+
+          Write-Host ""
+          Write-Host "================ FreeRDP executable ================"
+
+          $wfreerdp = "build/client/Windows/cli/Release/wfreerdp.exe"
+
+          if (!(Test-Path $wfreerdp)) {
+            Write-Error "wfreerdp.exe not found: $wfreerdp"
+            exit 1
+          }
+
+          Copy-Item `
+            $wfreerdp `
+            $package `
+            -Force
+
+
+          Write-Host ""
+          Write-Host "================ FreeRDP DLLs ================"
+
+          Get-ChildItem `
+            build `
+            -Recurse `
+            -Filter *.dll |
+          ForEach-Object {
+
+            Copy-Item `
+              $_.FullName `
+              $package `
+              -Force
+          }
+
+
+          Write-Host ""
+          Write-Host "================ OpenSSL DLLs ================"
+
+          $opensslBin = Join-Path `
+            $env:VCPKG_INSTALLATION_ROOT `
+            "installed\x64-windows\bin"
+
+          if (Test-Path $opensslBin) {
+
+            Get-ChildItem `
+              $opensslBin `
+              -Filter *.dll |
+            ForEach-Object {
+
+              Copy-Item `
+                $_.FullName `
+                $package `
+                -Force
+            }
+          }
+
+
+          Write-Host ""
+          Write-Host "================ zlib DLLs ================"
+
+          $zlibBin = Join-Path `
+            $env:VCPKG_INSTALLATION_ROOT `
+            "installed\x64-windows\bin"
+
+          if (Test-Path $zlibBin) {
+
+            Get-ChildItem `
+              $zlibBin `
+              -Filter *.dll |
+            ForEach-Object {
+
+              Copy-Item `
+                $_.FullName `
+                $package `
+                -Force
+            }
+          }
+
+
+          # ============================================================
+          # 10b. Package development files (headers + import libs)
+          #      so the Electron N-API addon can compile against 3.23.0
+          # ============================================================
+
+          Write-Host ""
+          Write-Host "================ Package dev headers ================"
+
+          $devInclude = "package/freerdp/include"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $devInclude | Out-Null
+
+          if (Test-Path "freerdp-src/include") {
+
+            Copy-Item `
+              "freerdp-src/include/*" `
+              $devInclude `
+              -Recurse `
+              -Force
+          }
+
+          if (Test-Path "build/include") {
+
+            Copy-Item `
+              "build/include/*" `
+              $devInclude `
+              -Recurse `
+              -Force
+          }
+
+          # FreeRDP 3 的 winpr 头位于源码 winpr/include/winpr（不在顶层 include），
+          # 以及 build 下各模块生成头（如 winpr_config.h），需一并打包，否则 addon 编译缺头
+          if (Test-Path "freerdp-src/winpr/include") {
+
+            Copy-Item `
+              "freerdp-src/winpr/include/*" `
+              $devInclude `
+              -Recurse `
+              -Force
+          }
+
+          Get-ChildItem `
+            build `
+            -Recurse `
+            -Directory `
+            -Filter include |
+            ForEach-Object {
+
+              Copy-Item `
+                "$($_.FullName)/*" `
+                $devInclude `
+                -Recurse `
+                -Force
+            }
+
+          Write-Host ""
+          Write-Host "================ Package import libs ================"
+
+          $devLib = "package/freerdp/lib"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $devLib | Out-Null
+
+          Get-ChildItem `
+            build `
+            -Recurse `
+            -Filter *.lib |
+            Copy-Item `
+              -Destination $devLib `
+              -Force
+
+
+          Write-Host ""
+          Write-Host "================ PACKAGE ================"
+
+          Get-ChildItem `
+            $package |
+          Sort-Object Name
+
+
+      # ============================================================
+      # 10c. Compile freerdp N-API addon (win32-x64)
+      #      Uses headers/libs from 10b; output freerdp.node
+      # ============================================================
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Prepare addon third_party (headers + import libs)
+        shell: pwsh
+        run: |
+          $tp = "native/freerdp/third_party/freerdp"
+          New-Item -ItemType Directory -Force -Path "$tp/include" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$tp/lib" | Out-Null
+          if (Test-Path "package/freerdp/include") {
+            Copy-Item "package/freerdp/include/*" "$tp/include" -Recurse -Force
+          }
+          if (Test-Path "package/freerdp/lib") {
+            Copy-Item "package/freerdp/lib/*.lib" "$tp/lib" -Force
+          }
+          Write-Host "================ third_party lib ================"
+          Get-ChildItem "$tp/lib" -ErrorAction SilentlyContinue | Select-Object Name
+          Write-Host "================ third_party include (top) ================"
+          Get-ChildItem "$tp/include" -ErrorAction SilentlyContinue | Select-Object Name
+
+      - name: Install node-gyp + node-addon-api (project root)
+        shell: pwsh
+        run: |
+          npm install --no-save --ignore-scripts node-addon-api node-gyp
+
+      - name: Compile freerdp addon (Electron N-API, win32-x64)
+        shell: pwsh
+        run: |
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $ev = ($pkg.devDependencies.electron -replace '[\^~]', '')
+          npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=x64 --dist-url=https://electronjs.org/headers
+
+      - name: Stage addon into package
+        shell: pwsh
+        run: |
+          # addon 与 DLL 放同目录（根）：Windows 加载 freerdp.node 时按自身目录
+          # 搜索依赖的 freerdp3.dll/winpr3.dll，必须同目录才能找到
+          Copy-Item "native/freerdp/build/Release/freerdp.node" "package/freerdp/freerdp.node" -Force
+
+
+      # ============================================================
+      # 11. Upload artifact
+      # ============================================================
+
+      - name: Upload FreeRDP
+        uses: actions/upload-artifact@v4
+        with:
+          name: freerdp-win64
+          path: package/freerdp/
