@@ -11,6 +11,7 @@ import { checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { WindowManager } from './window-manager'
 import {
   ConnectionProfile,
+  GlobalMacroStep,
   NewProfileInput,
   ProtocolType,
   SerialMacroStep,
@@ -225,6 +226,25 @@ export function registerIpc(
   ipcMain.on('serial:macro-stop', (_e, id: string) => {
     serialSession(id)?.macroStop()
   })
+
+  // ---------- 跨会话（多 SSH/串口）联动自动化 ----------
+  ipcMain.handle('globalmacro:targets', () => manager.listAutomationTargets())
+  ipcMain.handle(
+    'globalmacro:start',
+    (
+      _e,
+      run: { targets: string[]; steps: GlobalMacroStep[]; loop: number }
+    ) => {
+      const targets = Array.isArray(run?.targets) ? run.targets : []
+      const steps = Array.isArray(run?.steps) ? run.steps : []
+      return manager.runGlobalMacro({
+        targets,
+        steps,
+        loop: Number(run?.loop) || 1
+      })
+    }
+  )
+  ipcMain.on('globalmacro:stop', () => manager.stopGlobalMacro())
 
   // ---------- VNC / RDP WebSocket 端点 ----------
   ipcMain.handle('vnc:endpoint', (_e, id: string) => {

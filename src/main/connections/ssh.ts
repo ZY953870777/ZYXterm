@@ -89,6 +89,8 @@ export class SSHSession implements BaseSession {
   private cwdWaiters: Array<(cwd: string) => void> = []
   private outBuf = ''
   private pendingMarkTime = 0
+  /** 联动自动化 RX 订阅者 */
+  private dataListeners = new Set<(text: string) => void>()
 
   constructor(sessionId: string, profile: ConnectionProfile, send: SendFn) {
     this.sessionId = sessionId
@@ -229,6 +231,14 @@ export class SSHSession implements BaseSession {
     }
   }
 
+  /** 订阅解码后的 shell 输出（联动自动化 RX 匹配用） */
+  subscribeData(cb: (text: string) => void): () => void {
+    this.dataListeners.add(cb)
+    return () => {
+      this.dataListeners.delete(cb)
+    }
+  }
+
   resize(cols: number, rows: number): void {
     if (this.stream && !this.stream.destroyed) {
       this.stream.setWindow(rows, cols, 0, 0)
@@ -350,7 +360,16 @@ export class SSHSession implements BaseSession {
       this.outBuf = this.outBuf.slice(end + MARK_END.length)
       this.pendingMarkTime = 0
     }
-    if (out) this.send('terminal:data', this.sessionId, out)
+    if (out) {
+      this.send('terminal:data', this.sessionId, out)
+      for (const cb of this.dataListeners) {
+        try {
+          cb(out)
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 
   getCwd(): string | null {

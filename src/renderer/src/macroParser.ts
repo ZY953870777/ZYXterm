@@ -5,11 +5,12 @@
  *   tx "内容"   —— 向串口发送内容；支持转义 \\n \\r \\t \\\\（引号可单可双，可省略；
  *                  单引号内可含双引号、双引号内可含单引号，无需转义）
  *   rx "内容"   —— 等待串口输出包含该内容（子串匹配）后才执行下一条
- *   sleep 5s    —— 延迟（单位 s/m/h，不区分大小写；缺省秒）
+ *   sleep 10    —— 延迟；缺省单位秒，支持 10s / 2m / 1h（与联动自动化一致）
  *
  * 返回归一化步骤，供主进程执行。
  */
 import { SerialMacroStep } from '@shared/types'
+import { parseSleep } from './sleepUnits'
 
 /** 把脚本文本解析为步骤列表；出错返回 { steps, error }（error 为行号+原因） */
 export function parseMacroScript(text: string): {
@@ -68,14 +69,3 @@ function unescape(s: string): string {
   })
 }
 
-/** 解析 sleep 参数：数字 + [s|m|h]（大小写不敏感，缺省 s） */
-function parseSleep(s: string): number | null {
-  const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*([smhd]?)$/i)
-  if (!m) return null
-  const n = parseFloat(m[1])
-  const unit = m[2].toLowerCase()
-  if (unit === 'h') return n * 3600
-  if (unit === 'm') return n * 60
-  if (unit === 'd') return n * 86400
-  return n
-}

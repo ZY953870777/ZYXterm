@@ -1,14 +1,17 @@
-name: Release Windows + Linux x64
+name: Release Windows + Linux + macOS x64
 
 # 让 GitHub 自行完成：编译 FreeRDP + addon → 打包安装包 → 创建/更新 GitHub
 # Release 并上传 latest*.yml + 安装包（electron-updater 自动更新用）。
 #
 # 触发方式（二选一）：
 #   1. 推送版本标签：  git tag v0.1.0 && git push origin v0.1.0
-#   2. 网页手动触发：  Actions → Release Windows + Linux x64 → Run workflow
+#   2. 网页手动触发：  Actions → Release … → Run workflow
 #
-# 产物：Windows（nsis 安装包）、Linux（AppImage + deb），上传到同一 Release。
+# 产物：Windows（nsis 安装包）、Linux（AppImage + deb）、macOS（未签名 dmg；
+#   RDP addon best-effort，失败则退回无 RDP 版），上传到同一 Release。
 # 要求：仓库需可写（GITHUB_TOKEN + contents:write 即可，公开/私有均可用）。
+# macOS 未配置 Apple 证书：不签名不公证，Gatekeeper 需“右键→打开”；
+# electron-updater 的 mac 自动更新依赖签名，故 mac 上请手动安装。
 
 on:
   workflow_dispatch:
@@ -236,3 +239,128 @@ jobs:
         with:
           name: zyxterm-linux
           path: dist/*.AppImage
+
+  # ============================================================
+  # macOS arm64（Apple Silicon，macos-14）：未签名 dmg。
+  # RDP(FreeRDP addon) 为 best-effort：brew 装 freerdp + node-gyp 编 arm64
+  # addon，并把 freerdp3/winpr3/openssl dylib 随包（@loader_path）。任一步
+  # 失败不会阻断，自动退回“无 RDP”版本（应用对缺失 addon 已优雅降级）。
+  # ============================================================
+  release-macos:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # ---------- RDP(可选)：Homebrew FreeRDP3 ----------
+      - name: Install FreeRDP3 (Homebrew, best-effort)
+        continue-on-error: true
+        run: |
+          brew install freerdp || brew install freerdp@3 || echo "brew freerdp 安装失败（跳过 RDP）"
+
+      # ---------- 编 mac addon + 随包 dylib（@loader_path）----------
+      - name: Build freerdp addon + bundle dylibs (macOS, best-effort)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          D=resources/freerdp/build/Release
+          mkdir -p "$D"
+          FP="$(brew --prefix freerdp 2>/dev/null || brew --prefix freerdp@3 2>/dev/null || true)"
+          if [ -z "$FP" ] || ! ls "$FP"/lib/libfreerdp3*.dylib >/dev/null 2>&1; then
+            echo "无 freerdp brew 前缀/库，跳过 RDP（仍会出无 RDP 的 dmg）"
+            exit 0
+          fi
+
+          # 归一化 brew 头文件/库到仓库内固定路径（兼容 include/freerdp3、include/winpr3
+          # 等任意命名空间布局；binding.gyp 的 mac 段指向 third_party/mac_include|mac_lib）
+          MI=native/freerdp/third_party/mac_include
+          ML=native/freerdp/third_party/mac_lib
+          rm -rf "$MI" "$ML"
+          mkdir -p "$MI" "$ML"
+          FREERDP_H=$(find "$FP/include" -path '*/freerdp/freerdp.h' 2>/dev/null | head -1)
+          WINPR_H=$(find "$FP/include" -path '*/winpr/synch.h' 2>/dev/null | head -1)
+          if [ -z "$FREERDP_H" ] || [ -z "$WINPR_H" ]; then
+            echo "未找到 freerdp/winpr 头文件（$FP/include），跳过 RDP"
+            exit 0
+          fi
+          ln -sfn "${FREERDP_H%/freerdp/freerdp.h}/freerdp" "$MI/freerdp"
+          ln -sfn "${WINPR_H%/winpr/synch.h}/winpr" "$MI/winpr"
+          for l in "$FP"/lib/libfreerdp3*.dylib "$FP"/lib/libwinpr3*.dylib; do
+            [ -f "$l" ] && ln -sfn "$l" "$ML/$(basename "$l")"
+          done
+          echo "--- $MI ---"; ls -la "$MI"
+          echo "--- $ML ---"; ls -la "$ML"
+
+          npm install --no-save --ignore-scripts node-addon-api node-gyp
+          ev=$(node -e "console.log(require('./package.json').devDependencies.electron.replace(/[\^~]/,''))")
+          npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=arm64 --dist-url=https://electronjs.org/headers
+          cp -f native/freerdp/build/Release/freerdp.node "$D/"
+
+          # 递归收集非系统 dylib 依赖到 addon 同目录（freerdp3/winpr3/openssl…）
+          collect() {
+            local lib="$1"
+            otool -L "$lib" 2>/dev/null | awk '/^\t/{print $1}' | while read -r dep; do
+              case "$dep" in
+                @loader_path/*|@rpath/*|/usr/lib/*|/System/*) continue ;;
+              esac
+              local base; base=$(basename "$dep")
+              if [ -f "$dep" ] && [ ! -f "$D/$base" ]; then
+                cp -f "$dep" "$D/$base" 2>/dev/null || true
+                collect "$D/$base"
+              fi
+            done
+          }
+          collect "$D/freerdp.node"
+
+          # 把 addon/随包 dylib 的绝对依赖改写为 @loader_path/<名>，并归一 install_name
+          for f in "$D/freerdp.node" "$D/"*.dylib; do
+            [ -f "$f" ] || continue
+            otool -L "$f" 2>/dev/null | awk '/^\t/{print $1}' | while read -r dep; do
+              case "$dep" in
+                @loader_path/*|/usr/lib/*|/System/*) continue ;;
+              esac
+              install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$f" 2>/dev/null || true
+            done
+            self=$(basename "$f")
+            if [ "$self" != "freerdp.node" ]; then
+              install_name_tool -id "@loader_path/$self" "$f" 2>/dev/null || true
+            fi
+          done
+
+          # 随包 OpenSSL legacy provider（NLA/RC4 需要；rdp-worker 设 OPENSSL_MODULES）
+          OP="$(brew --prefix openssl@3 2>/dev/null || true)"
+          if [ -n "$OP" ] && [ -d "$OP/lib/ossl-modules" ]; then
+            cp -f "$OP"/lib/ossl-modules/*.dylib "$D/" 2>/dev/null || true
+          fi
+          echo "--- resources/freerdp/build/Release ---"
+          ls -la "$D"
+
+      # ---------- 安装依赖 + 构建 + 打包发布（未签名 dmg） ----------
+      - name: Install project deps
+        run: npm ci --ignore-scripts
+
+      - name: Build app
+        run: npm run build
+
+      - name: Package & Publish macOS Release (unsigned dmg)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --mac --arm64 --publish always
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zyxterm-macos
+          path: dist/*.dmg

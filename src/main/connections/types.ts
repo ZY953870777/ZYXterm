@@ -15,4 +15,6 @@ export interface BaseSession {
   write?(data: string): void
   /** 终端尺寸变化（SSH/串口） */
   resize?(cols: number, rows: number): void
+  /** 订阅解码后的输出文本（联动自动化 RX 匹配用）；返回退订函数 */
+  subscribeData?(cb: (text: string) => void): () => void
 }

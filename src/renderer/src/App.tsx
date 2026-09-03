@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { uiAlert, uiConfirm } from './dialogs'
+import { parseGlobalMacro } from './globalMacroParser'
+import GlobalMacroDialog from './components/GlobalMacroDialog'
+import GlobalMacroProgress from './components/GlobalMacroProgress'
+import type {
+  GlobalMacroScript,
+  GlobalMacroStatus,
+  GlobalMacroTarget
+} from '@shared/types'
 import {
   ConnectionProfile,
   NewProfileInput,
@@ -36,6 +44,12 @@ export default function App() {
   const [editProfile, setEditProfile] = useState<ConnectionProfile | null>(null)
   const [newProtocol, setNewProtocol] = useState<ProtocolType>('ssh')
   const [quickOpen, setQuickOpen] = useState(false)
+  // 跨会话（多 SSH/串口）联动自动化
+  const [gmOpen, setGmOpen] = useState(false)
+  const [gmRunOpen, setGmRunOpen] = useState(false)
+  const [gmStatus, setGmStatus] = useState<GlobalMacroStatus | null>(null)
+  const [gmTargets, setGmTargets] = useState<GlobalMacroTarget[]>([])
+  const [gmScript, setGmScript] = useState<GlobalMacroScript | null>(null)
   const [rdpAvailable, setRdpAvailable] = useState(true)
   // 自定义标题栏：窗口是否处于最大化（切换 最大化/还原 按钮图标）
   const [maximized, setMaximized] = useState(false)
@@ -285,6 +299,48 @@ export default function App() {
     []
   )
 
+  // ---------- 跨会话（多 SSH/串口）联动自动化 ----------
+  useEffect(() => {
+    const unsub = window.api.onGlobalMacroStatus((st) => setGmStatus(st))
+    return unsub
+  }, [])
+
+  const runGlobalMacro = useCallback(
+    async (targets: GlobalMacroTarget[], script: GlobalMacroScript): Promise<void> => {
+      const { steps, error } = parseGlobalMacro(script.text)
+      if (error || steps.length === 0) {
+        void uiAlert(error || '脚本为空')
+        return
+      }
+      for (const st of steps) {
+        if (st.op !== 'sleep' && (st.target < 0 || st.target >= targets.length)) {
+          void uiAlert(
+            `脚本引用了会话 ID ${st.target}，但只选了 ${targets.length} 个会话（顺序从 0 开始）`
+          )
+          return
+        }
+      }
+      setGmTargets(targets)
+      setGmScript(script)
+      setGmOpen(false)
+      setGmRunOpen(true)
+      const res = await window.api.globalMacroStart({
+        targets: targets.map((t) => t.sessionId),
+        steps,
+        loop: script.loop
+      })
+      if (!res.ok) {
+        void uiAlert(res.error ?? '启动失败')
+        setGmRunOpen(false)
+      }
+    },
+    []
+  )
+
+  const stopGlobalMacro = useCallback((): void => {
+    window.api.globalMacroStop()
+  }, [])
+
   const handleSaveProfile = useCallback(
     async (input: NewProfileInput, connectNow: boolean) => {
       let profile: ConnectionProfile
@@ -392,6 +448,18 @@ export default function App() {
           onDetachTab={handleDetachTab}
           onAttachTab={handleAttachTab}
         />
+        {/* 跨会话联动自动化入口：运行中点击打开进度页（含停止），否则打开配置框 */}
+        <button
+          className={`win-btn gm-window${gmStatus?.running ? ' running' : ''}`}
+          title={
+            gmStatus?.running
+              ? '联动自动化运行中：点击打开进度页（含停止）'
+              : '联动自动化（跨多个 SSH/串口，TX/RX/sleep，可循环）'
+          }
+          onClick={() => (gmStatus?.running ? setGmRunOpen(true) : setGmOpen(true))}
+        >
+          🧩{gmStatus?.running ? ` ${gmStatus.iter}/${gmStatus.loop === -1 ? '∞' : gmStatus.loop}` : ''}
+        </button>
         {/* 窗口控制按钮（macOS 使用系统红绿灯，隐藏自定义按钮） */}
         {window.api.platform !== 'darwin' && (
           <div className="window-controls">
@@ -494,6 +562,22 @@ export default function App() {
             setEditProfile(null)
           }}
           onSave={handleSaveProfile}
+        />
+      )}
+
+      {gmOpen && (
+        <GlobalMacroDialog
+          onRun={(t, s) => void runGlobalMacro(t, s)}
+          onClose={() => setGmOpen(false)}
+        />
+      )}
+      {gmRunOpen && gmScript && (
+        <GlobalMacroProgress
+          targets={gmTargets}
+          script={gmScript}
+          status={gmStatus}
+          onStop={stopGlobalMacro}
+          onClose={() => setGmRunOpen(false)}
         />
       )}
 

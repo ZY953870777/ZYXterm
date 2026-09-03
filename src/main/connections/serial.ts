@@ -67,6 +67,9 @@ export class SerialSession implements BaseSession {
     sleepResolve: (() => void) | null
   } | null = null
 
+  /** 联动自动化 RX 订阅者 */
+  private dataListeners = new Set<(text: string) => void>()
+
   constructor(sessionId: string, profile: ConnectionProfile, send: SendFn) {
     this.sessionId = sessionId
     this.profile = profile
@@ -203,6 +206,14 @@ export class SerialSession implements BaseSession {
 
   write(data: string): void {
     this.rawWrite(Buffer.from(data, 'utf8'))
+  }
+
+  /** 订阅解码后的串口输出文本（联动自动化 RX 匹配用） */
+  subscribeData(cb: (text: string) => void): () => void {
+    this.dataListeners.add(cb)
+    return () => {
+      this.dataListeners.delete(cb)
+    }
   }
 
   // 串口无终端尺寸概念
@@ -595,7 +606,15 @@ export class SerialSession implements BaseSession {
         /* 写失败不阻塞串口数据流 */
       }
     }
-    this.send('terminal:data', this.sessionId, data.toString('utf8'))
+    const text = data.toString('utf8')
+    this.send('terminal:data', this.sessionId, text)
+    for (const cb of this.dataListeners) {
+      try {
+        cb(text)
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private emitXmodem(st: XmodemStatus): void {

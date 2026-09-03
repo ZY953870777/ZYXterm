@@ -126,6 +126,48 @@ export interface SerialPortInfo {
   productId?: string
 }
 
+// ================= 跨会话（多 SSH/串口）联动自动化 =================
+
+/** 联动脚本（localStorage 持久化）。语法：TX<ID> / RX<ID> / sleep，ID 为选中会话次序 */
+export interface GlobalMacroScript {
+  id: string
+  name: string
+  text: string
+  /** -1 无限；>=1 有限 */
+  loop: number
+}
+
+/** 联动脚本步骤（渲染层解析后下发主进程） */
+export interface GlobalMacroStep {
+  op: 'tx' | 'rx' | 'sleep'
+  /** 目标会话下标（0..n-1）；sleep 无目标 */
+  target: number
+  text?: string
+  secs?: number
+}
+
+/** 参与联动的一个会话（渲染层按当前打开的 SSH/串口选择并排序） */
+export interface GlobalMacroTarget {
+  sessionId: string
+  profileId: string
+  name: string
+  kind: 'ssh' | 'serial'
+}
+
+/** 联动运行状态广播（channel: globalmacro:status） */
+export type GlobalMacroStatus = {
+  running: boolean
+  state: 'running' | 'done' | 'stopped' | 'error'
+  idx: number
+  total: number
+  iter: number
+  loop: number
+  targetIndex?: number
+  targetName?: string
+  op?: 'tx' | 'rx' | 'sleep'
+  message?: string
+}
+
 /** 串口自动化脚本步骤（由渲染层解析脚本文本后下发主进程执行） */
 export interface SerialMacroStep {
   op: 'tx' | 'rx' | 'sleep'

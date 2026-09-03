@@ -110,6 +110,9 @@ button {
   color: var(--text-dim);
   cursor: default;
   outline: none;
+  /* 窗口按钮若不在 .window-controls(no-drag) 内（如标题栏 🧩 联动按钮是
+     .titlebar 直接子元素），必须自带 no-drag，否则落在 drag 区内点击无效 */
+  -webkit-app-region: no-drag;
 }
 
 .win-btn:hover {
@@ -2284,4 +2287,179 @@ button {
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+/* ============ 跨会话（多 SSH/串口）联动自动化 ============ */
+.gm-window {
+  font-size: 13px;
+}
+.gm-window.running {
+  color: var(--yellow);
+}
+.global-dialog {
+  width: 860px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+.global-dialog .dialog-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.gm-pick {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+}
+.gm-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.gm-col-title {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.gm-avail,
+.gm-chosen {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  min-height: 90px;
+  max-height: 200px;
+}
+.gm-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+.gm-avail .gm-item:hover {
+  background: var(--bg-hover);
+}
+.gm-item.picked {
+  opacity: 0.45;
+}
+.gm-chosen-item {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  cursor: grab;
+}
+.gm-item .gm-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gm-add {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+}
+.gm-idx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+.gm-ops {
+  display: inline-flex;
+  gap: 2px;
+}
+.gm-ops button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.gm-ops button:hover {
+  color: var(--accent);
+}
+.gm-ops button.danger:hover {
+  color: var(--red);
+}
+.gm-scripts {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.gm-script-side {
+  width: 180px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.gm-edit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gm-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 150px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+}
+.gm-edit textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.gm-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.gm-tag {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2px 9px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.gm-tag b {
+  color: var(--accent);
+}
+.gm-cur-target {
+  color: var(--yellow);
 }

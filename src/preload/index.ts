@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron'
 import type {
   ConnectionProfile,
+  GlobalMacroStatus,
+  GlobalMacroStep,
+  GlobalMacroTarget,
   NewProfileInput,
   SessionInfo,
   SerialMacroStatus,
@@ -112,6 +115,22 @@ const api = {
     ipcRenderer.on('serial:macro-status', listener)
     return () => {
       ipcRenderer.removeListener('serial:macro-status', listener)
+    }
+  },
+
+  // ---------- 跨会话（多 SSH/串口）联动自动化 ----------
+  globalMacroTargets: (): Promise<GlobalMacroTarget[]> =>
+    ipcRenderer.invoke('globalmacro:targets'),
+  globalMacroStart: (
+    run: { targets: string[]; steps: GlobalMacroStep[]; loop: number }
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('globalmacro:start', run),
+  globalMacroStop: (): void => ipcRenderer.send('globalmacro:stop'),
+  onGlobalMacroStatus: (cb: (st: GlobalMacroStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, st: GlobalMacroStatus): void => cb(st)
+    ipcRenderer.on('globalmacro:status', listener)
+    return () => {
+      ipcRenderer.removeListener('globalmacro:status', listener)
     }
   },
 

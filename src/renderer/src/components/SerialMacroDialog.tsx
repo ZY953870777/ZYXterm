@@ -148,7 +148,7 @@ export default function SerialMacroDialog({ onRun, onClose }: Props) {
               </label>
               <div className="macro-hint">
                 <code>tx</code> 发送内容（支持 \n \r \t）｜<code>rx</code> 等待输出包含｜
-                <code>sleep 1s/m/h</code> 延时。引号可省、可单可双，行首 <code>#</code> 为注释。
+                <code>sleep</code> 延时：sleep 10 默认 10 秒；可用 sleep 10s / 2m / 1h。引号可省、可单可双，行首 <code>#</code> 为注释。
               </div>
               <div className="macro-parse">
                 {parsed.error ? (

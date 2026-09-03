@@ -35,6 +35,31 @@
               }
             }
           }
+        ],
+        [
+          "OS=='mac'",
+          {
+            "include_dirs": [
+              "third_party/mac_include",
+              "/usr/local/include",
+              "/usr/local/include/freerdp3",
+              "/opt/homebrew/include",
+              "/opt/homebrew/include/freerdp3"
+            ],
+            "libraries": [ "-lfreerdp3", "-lwinpr3" ],
+            "library_dirs": [
+              "third_party/mac_lib",
+              "/usr/local/lib",
+              "/opt/homebrew/lib"
+            ],
+            "xcode_settings": {
+              "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+              "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+              "GCC_ENABLE_CPP_RTTI": "YES",
+              "OTHER_CPLUSPLUSFLAGS": [ "-fexceptions" ],
+              "OTHER_LDFLAGS": [ "-Wl,-rpath,@loader_path" ]
+            }
+          }
         ]
       ]
     }

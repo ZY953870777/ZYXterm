@@ -33,11 +33,11 @@ function log(msg) {
 function findAddon() {
   const res = process.resourcesPath
   const dev = path.join(process.cwd(), 'native', 'freerdp', 'build', 'Release', 'freerdp.node')
-  // Linux 打包时 resources/freerdp/ 根目录可能误带 Windows PE 版 freerdp.node
-  // （用户从 freerdp-win64 下载放入），加载会报 "invalid ELF header"。
-  // 因此 Linux 优先选择 build/Release 的 ELF 版；Windows 优先根目录的 PE 版。
+  // Linux/macOS 打包时 resources/freerdp/ 根目录可能误带其它平台产物
+  // （如 Windows PE freerdp.node），加载会报格式错误。因此 Linux/macOS 优先
+  // 选择 build/Release 的 ELF/Mach-O 版；Windows 优先根目录的 PE 版。
   const cands =
-    process.platform === 'linux'
+    process.platform === 'linux' || process.platform === 'darwin'
       ? [
           path.join(res, 'freerdp', 'build', 'Release', 'freerdp.node'),
           dev
@@ -116,7 +116,8 @@ function start(config) {
   // OPENSSL_MODULES 仅 Windows 需要（随包 legacy.dll）；Linux 用系统默认
   // ossl-modules 目录（legacy.so 在系统路径），设错会致 legacy 加载失败 → NLA 失败
   try {
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      // Windows: 随包 legacy.dll；macOS: 随包 ossl-modules/*.dylib
       const modulesDir = path.dirname(addonPath)
       process.env.OPENSSL_MODULES = modulesDir
     }
