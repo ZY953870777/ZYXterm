@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { uiAlert, uiConfirm } from '../dialogs'
 import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { ProtocolType, SshDirEntry } from '@shared/types'
+import {
+  ProtocolType,
+  SerialMacroScript,
+  SerialMacroStatus,
+  SshDirEntry,
+  XmodemStatus
+} from '@shared/types'
+import { parseMacroScript } from '../macroParser'
 import FileTree from './ssh/FileTree'
 import CommandHistory from './ssh/CommandHistory'
 import CommandCompletion from './ssh/CommandCompletion'
@@ -9,6 +17,8 @@ import QuickCommandBar, {
   QuickCommand,
   QuickCommandGroup
 } from './ssh/QuickCommandBar'
+import SerialMacroDialog from './SerialMacroDialog'
+import SerialMacroProgress from './SerialMacroProgress'
 
 interface Props {
   sessionId: string
@@ -17,6 +27,12 @@ interface Props {
 }
 
 const QUICK_KEY = 'zyxterm:quick-commands'
+/** 串口实时日志：上次使用的保存路径（持久化，下次开启默认填入） */
+const SERIAL_LOG_KEY = 'zyxterm:serial-log-path'
+/** XMODEM 发送：上次选中的文件路径（对话框下次默认定位到该目录/文件） */
+const XMODEM_SEND_KEY = 'zyxterm:xmodem-send-path'
+/** XMODEM 接收：上次保存的文件路径（对话框下次默认填入） */
+const XMODEM_RECV_KEY = 'zyxterm:xmodem-recv-path'
 
 /** POSIX 路径拼接 / 上级 */
 function posixJoin(a: string, b: string): string {
@@ -36,6 +52,14 @@ function posixNormalize(p: string): string {
     else out.push(part)
   }
   return '/' + out.join('/')
+}
+
+/** 字节数人性化显示 */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
 function loadQuickGroups(): QuickCommandGroup[] {
@@ -349,7 +373,7 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
         if (!text) return
         if (/[\r\n]/.test(text)) {
           const preview = text.length > 1000 ? text.slice(0, 1000) + '…' : text
-          const ok = window.confirm(`剪贴板内容包含换行，确认粘贴？\n\n${preview}`)
+          const ok = await uiConfirm(`剪贴板内容包含换行，确认粘贴？\n\n${preview}`)
           if (!ok) return
         }
         window.api.terminalWrite(sessionIdRef.current, text)
@@ -472,7 +496,7 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
     async (entry: SshDirEntry) => {
       const remote = posixJoin(cwd ?? '/', entry.name)
       const res = await window.api.sshDownload(sessionIdRef.current, remote)
-      if (!res.saved && res.error) alert(`下载失败: ${res.error}`)
+      if (!res.saved && res.error) void uiAlert(`下载失败: ${res.error}`)
     },
     [cwd]
   )
@@ -482,7 +506,7 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
       const localPath = window.api.getPathForFile(file)
       const remote = posixJoin(cwd ?? '/', file.name)
       const res = await window.api.sshUpload(sessionIdRef.current, remote, localPath)
-      if (!res.ok) alert(`上传失败: ${res.error}`)
+      if (!res.ok) void uiAlert(`上传失败: ${res.error}`)
       else void refreshDir()
     },
     [cwd, refreshDir]
@@ -524,10 +548,306 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
     [submitCommand]
   )
 
+  // ---------- 串口 XMODEM 文件传输 ----------
+  const isSerial = protocol === 'serial'
+  const [xmodem, setXmodem] = useState<XmodemStatus | null>(null)
+  // 接收文件时设备端 sz 发送方不传文件名，用系统时间兜底命名提示
+  const xmodemActive =
+    xmodem !== null && (xmodem.state === 'started' || xmodem.state === 'progress')
+
+  useEffect(() => {
+    if (!isSerial) return
+    const unsub = window.api.onSerialXmodemStatus((id, st) => {
+      if (id !== sessionIdRef.current) return
+      if (st.state === 'done' || st.state === 'error' || st.state === 'cancel') {
+        // 结果状态短暂展示后隐藏
+        setXmodem({ ...st })
+        window.setTimeout(() => setXmodem(null), 6000)
+      } else {
+        setXmodem(st)
+      }
+    })
+    return unsub
+  }, [isSerial, sessionId])
+
+  const handleXmodemSend = useCallback(async (): Promise<void> => {
+    try {
+      let last: string | null = null
+      try {
+        last = localStorage.getItem(XMODEM_SEND_KEY)
+      } catch {
+        /* ignore */
+      }
+      const res = await window.api.serialXmodemSend(sessionIdRef.current, last ?? undefined)
+      if (!res.ok) {
+        if (res.error && res.error !== '已取消') void uiAlert(res.error)
+        return
+      }
+      // 持久化本次选中的路径，下次打开默认定位到该路径
+      if (res.path) {
+        try {
+          localStorage.setItem(XMODEM_SEND_KEY, res.path)
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const handleXmodemReceive = useCallback(async (): Promise<void> => {
+    try {
+      let last: string | null = null
+      try {
+        last = localStorage.getItem(XMODEM_RECV_KEY)
+      } catch {
+        /* ignore */
+      }
+      const res = await window.api.serialXmodemReceive(sessionIdRef.current, last ?? undefined)
+      if (!res.ok) {
+        if (res.error && res.error !== '已取消') void uiAlert(res.error)
+        return
+      }
+      if (res.path) {
+        try {
+          localStorage.setItem(XMODEM_RECV_KEY, res.path)
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const handleXmodemCancel = useCallback((): void => {
+    window.api.serialXmodemCancel(sessionIdRef.current)
+  }, [])
+
+  // ---------- 串口实时日志 ----------
+  const [serialLog, setSerialLog] = useState<{ logging: boolean; path?: string }>({
+    logging: false
+  })
+
+  useEffect(() => {
+    if (!isSerial) return
+    // 初始与主进程当前记录状态同步（如重开界面/切回 tab）
+    window.api
+      .serialLogState(sessionIdRef.current)
+      .then((st) => setSerialLog(st))
+      .catch(() => {})
+    const unsub = window.api.onSerialLogStatus((id, st) => {
+      if (id === sessionIdRef.current) setSerialLog(st)
+    })
+    return unsub
+  }, [isSerial, sessionId])
+
+  // ---------- 串口自动化脚本 ----------
+  const [macroEditorOpen, setMacroEditorOpen] = useState(false)
+  const [macroProgressOpen, setMacroProgressOpen] = useState(false)
+  const [macroStatus, setMacroStatus] = useState<SerialMacroStatus | null>(null)
+  const [runningMacro, setRunningMacro] = useState<SerialMacroScript | null>(null)
+
+  useEffect(() => {
+    if (!isSerial) return
+    const unsub = window.api.onSerialMacroStatus((id, st) => {
+      if (id === sessionIdRef.current) setMacroStatus(st)
+    })
+    return unsub
+  }, [isSerial, sessionId])
+
+  /** 运行脚本：解析 → 记录运行脚本 → 自动弹出进度页 → 交给主进程执行 */
+  const runMacro = useCallback(async (script: SerialMacroScript): Promise<void> => {
+    const { steps, error } = parseMacroScript(script.text)
+    if (error || steps.length === 0) {
+      void uiAlert(error || '脚本为空')
+      return
+    }
+    setRunningMacro(script)
+    setMacroEditorOpen(false)
+    setMacroProgressOpen(true)
+    const res = await window.api.serialMacroStart(sessionIdRef.current, {
+      steps,
+      loop: script.loop
+    })
+    if (!res.ok) {
+      void uiAlert(res.error ?? '启动失败')
+      setRunningMacro(null)
+      setMacroProgressOpen(false)
+    }
+  }, [])
+
+  /** 停止自动化脚本 */
+  const stopMacro = useCallback((): void => {
+    window.api.serialMacroStop(sessionIdRef.current)
+  }, [])
+
+  const toggleSerialLog = useCallback(async (): Promise<void> => {
+    try {
+      if (serialLog.logging) {
+        await window.api.serialLogStop(sessionIdRef.current)
+        return
+      }
+      // 上次保存路径持久化：下次开启默认填入
+      let last: string | null = null
+      try {
+        last = localStorage.getItem(SERIAL_LOG_KEY)
+      } catch {
+        /* ignore */
+      }
+      const res = await window.api.serialLogStart(sessionIdRef.current, last ?? undefined)
+      if (!res.ok) {
+        if (res.error && res.error !== '已取消') void uiAlert(res.error)
+        return
+      }
+      if (res.path) {
+        try {
+          localStorage.setItem(SERIAL_LOG_KEY, res.path)
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [serialLog.logging])
+
   if (!isSsh) {
+    const pct = xmodem && xmodem.total
+      ? Math.min(100, Math.round(((xmodem.sent ?? 0) / xmodem.total) * 100))
+      : 0
+    const resultText = ((): string => {
+      if (!xmodem) return ''
+      switch (xmodem.state) {
+        case 'done':
+          return xmodem.mode === 'recv'
+            ? `接收完成：${xmodem.savePath ?? ''}`
+            : `发送完成：${xmodem.name ?? ''}`
+        case 'error':
+          return `失败：${xmodem.message ?? '未知错误'}`
+        case 'cancel':
+          return '已取消'
+        default:
+          return ''
+      }
+    })()
     return (
-      <div className="terminal-wrap">
-        <div className="terminal-container" ref={containerRef} />
+      <div className="serial-layout">
+        <div className="serial-toolbar">
+          <span className="serial-toolbar-title">串口传输</span>
+          <button
+            className="tool-btn"
+            onClick={() => void handleXmodemSend()}
+            disabled={xmodemActive}
+            title="将本地文件通过 XMODEM 发给设备（对端先执行 rx 接收）"
+          >
+            ⬆ 发送文件 (XMODEM)
+          </button>
+          <button
+            className="tool-btn"
+            onClick={() => void handleXmodemReceive()}
+            disabled={xmodemActive}
+            title="从设备经 XMODEM 接收文件到本地（对端先执行 sz 发送）"
+          >
+            ⬇ 接收文件 (XMODEM)
+          </button>
+          {xmodemActive && (
+            <button className="tool-btn danger" onClick={handleXmodemCancel}>
+              取消传输
+            </button>
+          )}
+          <div className="serial-toolbar-right">
+            {!xmodemActive && resultText && (
+              <span className={`xmodem-result ${xmodem?.state ?? ''}`}>{resultText}</span>
+            )}
+            {macroStatus?.running && runningMacro ? (
+              <span className="macro-run-group">
+                {/* 主体：点开进度页；右侧小图标：停止 */}
+                <button
+                  className="tool-btn macro-run-main"
+                  onClick={() => setMacroProgressOpen(true)}
+                  title={macroStatus.message ?? '查看自动化进度'}
+                >
+                  ▶ {runningMacro.name || '脚本'} 第{macroStatus.iter}轮 步骤
+                  {Math.min(macroStatus.idx + 1, macroStatus.total)}/{macroStatus.total}
+                </button>
+                <button
+                  className="tool-btn danger macro-run-stop"
+                  title="停止自动化"
+                  onClick={stopMacro}
+                >
+                  ⏹
+                </button>
+              </span>
+            ) : (
+              <button
+                className="tool-btn"
+                onClick={() => setMacroEditorOpen(true)}
+                title="串口自动化脚本（TX 发送 / RX 等待输出 / SLEEP 延时，可循环）"
+              >
+                🛠 自动化
+              </button>
+            )}
+            <button
+              className={`tool-btn${serialLog.logging ? ' active' : ''}`}
+              onClick={() => void toggleSerialLog()}
+              title={
+                serialLog.logging
+                  ? '正在实时保存串口日志，点击停止'
+                  : '开启实时保存串口日志（可自定义路径与文件名；下次开启默认填入上次路径）'
+              }
+            >
+              {serialLog.logging ? '■ 停止日志' : '📝 记录日志'}
+            </button>
+            {serialLog.logging && serialLog.path && (
+              <span className="serial-log-path" title={serialLog.path}>
+                {serialLog.path}
+              </span>
+            )}
+          </div>
+        </div>
+        {xmodemActive && (
+          <div className="xmodem-panel">
+            <div className="xmodem-meta">
+              <span className="xmodem-name">
+                {xmodem.mode === 'send'
+                  ? `发送 ${xmodem.name ?? ''}`
+                  : `接收文件`}
+              </span>
+              <span className="xmodem-dir">
+                {xmodem.mode === 'send'
+                  ? xmodem.total
+                    ? `${pct}% (${formatBytes(xmodem.sent ?? 0)} / ${formatBytes(xmodem.total)})`
+                    : '发送中…'
+                  : `已接收 ${formatBytes(xmodem.sent ?? 0)}`}
+              </span>
+            </div>
+            <div className="xmodem-bar">
+              <div
+                className={`xmodem-fill${xmodem.total ? '' : ' indeterminate'}`}
+                style={xmodem.total ? { width: `${pct}%` } : undefined}
+              />
+            </div>
+          </div>
+        )}
+        <div className="terminal-wrap">
+          <div className="terminal-container" ref={containerRef} />
+        </div>
+        {macroEditorOpen && (
+          <SerialMacroDialog
+            onRun={(s) => void runMacro(s)}
+            onClose={() => setMacroEditorOpen(false)}
+          />
+        )}
+        {macroProgressOpen && runningMacro && (
+          <SerialMacroProgress
+            script={runningMacro}
+            status={macroStatus}
+            onStop={stopMacro}
+            onClose={() => setMacroProgressOpen(false)}
+          />
+        )}
       </div>
     )
   }

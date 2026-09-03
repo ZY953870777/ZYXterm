@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Tab } from '../App'
 import { PROTOCOLS } from './protocols'
 
@@ -66,6 +66,63 @@ export default function SessionTabs({
   const [ghost, setGhost] = useState<GhostState | null>(null)
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const dragRef = useRef<DragState | null>(null)
+  const tabsRef = useRef<HTMLDivElement>(null)
+  // 是否可向左右滚动（有溢出才显示 ‹ › 箭头）
+  const [over, setOver] = useState<{ l: boolean; r: boolean }>({ l: false, r: false })
+
+  const syncOverflow = (): void => {
+    const el = tabsRef.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    setOver({ l: el.scrollLeft > 4, r: el.scrollLeft < max - 4 })
+  }
+
+  // 监听滚动/尺寸变化（新增/关闭/重排/窗口缩放）刷新箭头可见性
+  useEffect(() => {
+    const el = tabsRef.current
+    if (!el) return
+    syncOverflow()
+    el.addEventListener('scroll', syncOverflow, { passive: true })
+    const ro = new ResizeObserver(syncOverflow)
+    ro.observe(el)
+    window.addEventListener('resize', syncOverflow)
+    return () => {
+      el.removeEventListener('scroll', syncOverflow)
+      ro.disconnect()
+      window.removeEventListener('resize', syncOverflow)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, activeId])
+
+  /** 向左/右滚动一屏的一部分 */
+  const scrollTabsBy = (dir: -1 | 1): void => {
+    const el = tabsRef.current
+    if (!el) return
+    const step = Math.max(220, el.clientWidth * 0.7)
+    el.scrollBy({ left: dir * step, behavior: 'smooth' })
+  }
+
+  /** 滚轮 → 横向滚动 tab 栏（即使滚轮只有纵向增量也能在标签多时前后滚动） */
+  const onTabsWheel = (e: React.WheelEvent<HTMLDivElement>): void => {
+    const el = tabsRef.current
+    if (!el || el.scrollWidth <= el.clientWidth) return
+    const dy = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX
+    el.scrollLeft += dy
+  }
+
+  // 让当前激活 tab 保持可见：新增 tab（激活在末尾）时滚到能露出它；点选被
+  // 挤到屏幕外的靠前 tab 时自动滚回。避免“固定滚到最右导致前面的 tab 看不到”
+  useEffect(() => {
+    const el = tabsRef.current
+    if (!el) return
+    const activeEl = el.querySelector<HTMLElement>('.tab.active')
+    if (!activeEl) return
+    const pad = 8
+    const c = el.getBoundingClientRect()
+    const a = activeEl.getBoundingClientRect()
+    if (a.left < c.left + pad) el.scrollLeft -= c.left + pad - a.left
+    else if (a.right > c.right - pad) el.scrollLeft += a.right - (c.right - pad)
+  }, [tabs, activeId])
 
   const closeMenu = (): void => setMenu(null)
 
@@ -159,7 +216,20 @@ export default function SessionTabs({
   }
 
   return (
-    <div className="tabs">
+    <div className="tabs" ref={tabsRef} onWheel={onTabsWheel}>
+      {over.l && (
+        <button
+          className="tab-arrow tab-arrow-left"
+          title="查看左侧更多 tab"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            scrollTabsBy(-1)
+          }}
+        >
+          ‹
+        </button>
+      )}
       {tabs.map((t, i) => {
         const statusText = STATUS_TEXT[t.status] ?? t.status
         const protoLabel = PROTOCOLS.find((p) => p.key === t.protocol)?.label ?? t.protocol
@@ -202,6 +272,19 @@ export default function SessionTabs({
       <button className="tab-add" onClick={onAdd} title="新建 / 选择连接">
         ＋
       </button>
+      {over.r && (
+        <button
+          className="tab-arrow tab-arrow-right"
+          title="查看右侧更多 tab"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            scrollTabsBy(1)
+          }}
+        >
+          ›
+        </button>
+      )}
 
       {menu && (
         <>

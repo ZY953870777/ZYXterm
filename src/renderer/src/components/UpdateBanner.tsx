@@ -6,7 +6,7 @@ import { UpdaterState } from '@shared/types'
  * - available → 提示"发现新版本"，可下载/稍后
  * - downloading → 进度条
  * - downloaded → 提示"重启并安装"
- * - error → 提示失败并可重试
+ * - error → 静默（主进程已每小时自动循环检测，失败无需手动重试）
  */
 export default function UpdateBanner() {
   const [upd, setUpd] = useState<UpdaterState>({ state: 'idle' })
@@ -16,20 +16,14 @@ export default function UpdateBanner() {
     return unsub
   }, [])
 
-  if (upd.state === 'idle' || upd.state === 'checking' || upd.state === 'not-available') {
+  if (
+    upd.state === 'idle' ||
+    upd.state === 'checking' ||
+    upd.state === 'not-available' ||
+    upd.state === 'error'
+  ) {
+    // 检测/更新失败：静默不打扰（主进程已每小时自动循环检测，无需手动重试）
     return null
-  }
-
-  if (upd.state === 'error') {
-    return (
-      <div className="update-banner error">
-        <span className="update-msg">更新检查失败：{upd.message}</span>
-        <button onClick={() => window.api.checkForUpdates()}>重试</button>
-        <button className="ghost" onClick={() => setUpd({ state: 'idle' })}>
-          关闭
-        </button>
-      </div>
-    )
   }
 
   if (upd.state === 'available') {

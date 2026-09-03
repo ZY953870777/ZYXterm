@@ -3,9 +3,12 @@ import type {
   ConnectionProfile,
   NewProfileInput,
   SessionInfo,
+  SerialMacroStatus,
+  SerialMacroStep,
   SerialPortInfo,
   SshDirEntry,
-  UpdaterState
+  UpdaterState,
+  XmodemStatus
 } from '@shared/types'
 
 export interface DropResult {
@@ -16,6 +19,8 @@ export interface DropResult {
 /** 暴露给渲染进程的安全 API */
 const api = {
   platform: process.platform,
+  // 临时调试：写日志到主进程 userData/debug.log
+  debugLog: (msg: string): void => ipcRenderer.send('debug:log', msg),
 
   // ---------- 通用 ----------
   selectFile: (): Promise<string | null> =>
@@ -71,6 +76,69 @@ const api = {
   // ---------- 串口 ----------
   listSerialPorts: (): Promise<SerialPortInfo[]> =>
     ipcRenderer.invoke('serial:list'),
+
+  // ---------- 串口 XMODEM 文件传输 ----------
+  // 选择本地文件并发送（内部弹系统文件对话框，defaultPath=上次路径默认定位）
+  serialXmodemSend: (
+    id: string,
+    defaultPath?: string
+  ): Promise<{ ok: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('serial:xmodem-send', id, defaultPath),
+  // 选择保存路径并进入接收（内部弹系统保存对话框，defaultPath=上次保存路径）
+  serialXmodemReceive: (
+    id: string,
+    defaultPath?: string
+  ): Promise<{ ok: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('serial:xmodem-receive', id, defaultPath),
+  serialXmodemCancel: (id: string): void => ipcRenderer.send('serial:xmodem-cancel', id),
+  onSerialXmodemStatus: (cb: (id: string, status: XmodemStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, id: string, status: XmodemStatus): void =>
+      cb(id, status)
+    ipcRenderer.on('serial:xmodem-status', listener)
+    return () => {
+      ipcRenderer.removeListener('serial:xmodem-status', listener)
+    }
+  },
+
+  // ---------- 串口自动化脚本（TX/RX/SLEEP） ----------
+  serialMacroStart: (
+    id: string,
+    run: { steps: SerialMacroStep[]; loop: number }
+  ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('serial:macro-start', id, run),
+  serialMacroStop: (id: string): void => ipcRenderer.send('serial:macro-stop', id),
+  onSerialMacroStatus: (cb: (id: string, st: SerialMacroStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, id: string, st: SerialMacroStatus): void =>
+      cb(id, st)
+    ipcRenderer.on('serial:macro-status', listener)
+    return () => {
+      ipcRenderer.removeListener('serial:macro-status', listener)
+    }
+  },
+
+  // ---------- 串口实时日志 ----------
+  // 开启（弹保存对话框，默认填入上次路径）后实时记录串口接收数据
+  serialLogStart: (
+    id: string,
+    defaultPath?: string
+  ): Promise<{ ok: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('serial:log-start', id, defaultPath),
+  serialLogStop: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('serial:log-stop', id),
+  serialLogState: (id: string): Promise<{ logging: boolean; path?: string }> =>
+    ipcRenderer.invoke('serial:log-state', id),
+  onSerialLogStatus: (
+    cb: (id: string, st: { logging: boolean; path?: string }) => void
+  ): (() => void) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      id: string,
+      st: { logging: boolean; path?: string }
+    ): void => cb(id, st)
+    ipcRenderer.on('serial:log-status', listener)
+    return () => {
+      ipcRenderer.removeListener('serial:log-status', listener)
+    }
+  },
 
   // ---------- VNC / RDP WebSocket 端点 ----------
   getWsEndpoint: (id: string): Promise<string | null> =>

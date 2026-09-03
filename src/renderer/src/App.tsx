@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { uiAlert, uiConfirm } from './dialogs'
 import {
   ConnectionProfile,
   NewProfileInput,
@@ -40,11 +41,19 @@ export default function App() {
   const [maximized, setMaximized] = useState(false)
   // 全屏：窗口是否处于全屏（铺满显示器）；全屏时隐藏标题栏/标签栏
   const [appFullscreen, setAppFullscreen] = useState(false)
+  // 右击 tab 编辑时的来源 tab 会话 id：保存后按新参数刷新该 tab（不新开）
+  const [editSessionId, setEditSessionId] = useState<string | null>(null)
+  const editSessionIdRef = useRef<string | null>(null)
 
   const activeIdRef = useRef<string | null>(null)
   useEffect(() => {
     activeIdRef.current = activeId
   }, [activeId])
+
+  const tabsRef = useRef<Tab[]>([])
+  useEffect(() => {
+    tabsRef.current = tabs
+  }, [tabs])
 
   // 自定义标题栏：初始读取最大化状态 + 订阅主进程最大化/还原事件
   useEffect(() => {
@@ -152,6 +161,23 @@ export default function App() {
     [moveTabOut]
   )
 
+  // tab 切换后把焦点交给激活页面（终端/RDP/VNC 的可聚焦元素），便于直接输入
+  const focusActivePane = useCallback((): void => {
+    // 等 React 完成激活 pane 渲染（双 rAF）
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const pane = document.querySelector<HTMLElement>(
+          '.session-pane[data-active="true"]'
+        )
+        if (!pane) return
+        const el = pane.querySelector<HTMLElement>(
+          'textarea, canvas, [tabindex]:not([tabindex="-1"])'
+        )
+        el?.focus()
+      })
+    })
+  }, [])
+
   const openProfile = useCallback(async (profile: ConnectionProfile) => {
     try {
       const info = await window.api.createSession(profile)
@@ -166,10 +192,12 @@ export default function App() {
       }
       setTabs((prev) => [...prev, tab])
       setActiveId(info.sessionId)
+      // 新会话 pane 挂载后把焦点交给它（SSH 终端等可直接输入）
+      focusActivePane()
     } catch (e) {
-      alert(`连接失败: ${(e as Error).message}`)
+      void uiAlert(`连接失败: ${(e as Error).message}`)
     }
-  }, [])
+  }, [focusActivePane])
 
   const closeTab = useCallback(async (sessionId: string) => {
     await window.api.closeSession(sessionId)
@@ -195,6 +223,31 @@ export default function App() {
     [openProfile]
   )
 
+  /** 编辑保存后刷新当前 tab：关闭原会话，按新 profile 重连，替换原 tab（保留位置） */
+  const refreshTab = useCallback(
+    async (profile: ConnectionProfile, oldSessionId: string) => {
+      try {
+        await window.api.closeSession(oldSessionId)
+        const info = await window.api.createSession(profile)
+        const tab: Tab = {
+          sessionId: info.sessionId,
+          name: info.name,
+          protocol: info.protocol,
+          status: info.status,
+          message: info.message,
+          wsEndpoint: info.wsEndpoint,
+          profile
+        }
+        setTabs((prev) => prev.map((t) => (t.sessionId === oldSessionId ? tab : t)))
+        setActiveId((prev) => (prev === oldSessionId ? info.sessionId : prev))
+        focusActivePane()
+      } catch (e) {
+        void uiAlert(`连接失败: ${(e as Error).message}`)
+      }
+    },
+    [focusActivePane]
+  )
+
   /** 拖动 tab 左右换位置 */
   const reorderTab = useCallback((from: number, to: number) => {
     setTabs((prev) => {
@@ -212,17 +265,25 @@ export default function App() {
     setDialogOpen(true)
   }, [])
 
-  const openEdit = useCallback((profile: ConnectionProfile) => {
+  const openEdit = useCallback((profile: ConnectionProfile, fromTab?: Tab) => {
     setNewProtocol(profile.protocol)
     setEditProfile(profile)
+    // 记录编辑来源：右击 tab 编辑时携带该 tab 的 sessionId，保存后刷新该 tab
+    setEditSessionId(fromTab?.sessionId ?? null)
+    editSessionIdRef.current = fromTab?.sessionId ?? null
     setDialogOpen(true)
   }, [])
 
-  const handleDeleteProfile = useCallback(async (id: string) => {
-    if (!window.confirm('确定删除该连接配置？')) return
-    await window.api.deleteProfile(id)
-    setProfiles((prev) => prev.filter((p) => p.id !== id))
-  }, [])
+  const handleDeleteProfile = useCallback(
+    async (id: string) => {
+      // 自绘确认框（原生 window.confirm 会夺走焦点且关闭后不归还，导致 SSH 键入异常）
+      const ok = await uiConfirm('确定删除该连接配置？', { danger: true })
+      if (!ok) return
+      await window.api.deleteProfile(id)
+      setProfiles((prev) => prev.filter((p) => p.id !== id))
+    },
+    []
+  )
 
   const handleSaveProfile = useCallback(
     async (input: NewProfileInput, connectNow: boolean) => {
@@ -234,11 +295,22 @@ export default function App() {
         profile = await window.api.saveProfile(input)
         setProfiles((prev) => [...prev, profile])
       }
+      const fromSessionId = editSessionIdRef.current
+      editSessionIdRef.current = null
+      setEditSessionId(null)
       setDialogOpen(false)
       setEditProfile(null)
-      if (connectNow) await openProfile(profile)
+      // 右击 tab 编辑：若该 tab 仍打开，按新参数刷新（重连）当前 tab，不新开
+      if (
+        fromSessionId &&
+        tabsRef.current.some((t) => t.sessionId === fromSessionId)
+      ) {
+        await refreshTab(profile, fromSessionId)
+      } else if (connectNow) {
+        await openProfile(profile)
+      }
     },
-    [editProfile, openProfile]
+    [editProfile, openProfile, refreshTab]
   )
 
   // 首页列表排序：主进程在同协议类别内重排并持久化，返回新列表
@@ -254,22 +326,14 @@ export default function App() {
     []
   )
 
-  // tab 切换后把焦点交给激活页面（终端/RDP/VNC 的可聚焦元素），便于直接输入
-  const focusActivePane = useCallback((): void => {
-    // 等 React 完成激活 pane 渲染（双 rAF）
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const pane = document.querySelector<HTMLElement>(
-          '.session-pane[data-active="true"]'
-        )
-        if (!pane) return
-        const el = pane.querySelector<HTMLElement>(
-          'textarea, canvas, [tabindex]:not([tabindex="-1"])'
-        )
-        el?.focus()
-      })
-    })
-  }, [])
+  // 覆盖弹窗（快捷选择/新建编辑/删除确认等原生 confirm 关闭后）关闭时，
+  // 把键盘焦点还给当前会话页——否则 SSH 终端等会“键入无反应/输入不正常”
+  const anyOverlayOpen = quickOpen || dialogOpen
+  const prevOverlayRef = useRef(anyOverlayOpen)
+  useEffect(() => {
+    if (prevOverlayRef.current && !anyOverlayOpen) focusActivePane()
+    prevOverlayRef.current = anyOverlayOpen
+  }, [anyOverlayOpen, focusActivePane])
 
   // 全屏进/出：乐观更新全局状态（立即隐藏/恢复标题栏）+ 主进程窗口全屏
   const enterFullscreen = useCallback(() => {
@@ -323,7 +387,7 @@ export default function App() {
           onClose={closeTab}
           onAdd={() => setQuickOpen(true)}
           onReconnect={reconnectTab}
-          onEdit={(tab) => openEdit(tab.profile)}
+          onEdit={(tab) => openEdit(tab.profile, tab)}
           onReorder={reorderTab}
           onDetachTab={handleDetachTab}
           onAttachTab={handleAttachTab}

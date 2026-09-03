@@ -17,6 +17,8 @@ export interface SSHProfile {
   passphrase: string
   /** passphrase 是否已加密存储 */
   passphraseEnc?: boolean
+  /** 连接成功后自动执行的命令（可选；交互 shell 中回车执行） */
+  startupCommand?: string
 }
 
 export interface SerialProfile {
@@ -26,6 +28,14 @@ export interface SerialProfile {
   stopBits: 1 | 2
   parity: 'none' | 'even' | 'odd'
   flowControl: 'none' | 'hardware' | 'software'
+  /** 连接模式：local=本机串口(serialport)；tcp=网络串口(net.Socket) */
+  mode?: 'local' | 'tcp'
+  /** tcp 模式：目标主机（设备端 ser2net/socat 所在） */
+  host?: string
+  /** tcp 模式：目标端口 */
+  port?: number
+  /** tcp 模式：启用 RFC2217（Telnet 串口参数协商，动态改波特率/流控）——预留 */
+  rfc2217?: boolean
 }
 
 /** VNC 画面缩放方式 */
@@ -59,8 +69,6 @@ export interface RDPProfile {
   /** password 是否已加密存储 */
   passwordEnc?: boolean
   domain: string
-  /** 分辨率，如 1280x800 */
-  resolution: string
 }
 
 /** 持久化的连接配置 */
@@ -118,16 +126,60 @@ export interface SerialPortInfo {
   productId?: string
 }
 
+/** 串口自动化脚本步骤（由渲染层解析脚本文本后下发主进程执行） */
+export interface SerialMacroStep {
+  op: 'tx' | 'rx' | 'sleep'
+  /** tx 发送内容 / rx 等待内容（转义已解析） */
+  text?: string
+  /** sleep 秒数（由 s/m/h 换算） */
+  secs?: number
+}
+
+/** 串口自动化脚本（localStorage 持久化） */
+export interface SerialMacroScript {
+  id: string
+  name: string
+  /** 原始脚本文本（多行：tx/rx/sleep，行首 # 为注释） */
+  text: string
+  /** 循环次数；-1 = 无限，>=1 有限 */
+  loop: number
+}
+
+/** 自动化运行状态广播（channel: serial:macro-status） */
+export type SerialMacroStatus = {
+  running: boolean
+  state: 'running' | 'done' | 'stopped' | 'error'
+  /** 当前步骤（0-based） */
+  idx: number
+  total: number
+  /** 当前第几轮（1-based） */
+  iter: number
+  /** 总轮数；-1 表示无限 */
+  loop: number
+  op?: 'tx' | 'rx' | 'sleep'
+  message?: string
+}
+
+/**
+ * XMODEM 传输状态（主进程 → 渲染进程广播，channel: serial:xmodem-status）
+ * state:
+ * - started: 已进入传输模式（UI 显示进度条）
+ * - progress: 进度更新（sent/total，单位为字节；接收方向 total 在完成前未知）
+ * - done / error / cancel: 传输结束（恢复普通终端显示）
+ */
+export type XmodemStatus = {
+  state: 'started' | 'progress' | 'done' | 'error' | 'cancel'
+  mode?: 'send' | 'recv'
+  /** 已发送/接收字节 */
+  sent?: number
+  /** 总字节（发送方向可知；接收方向完成后为收到的长度） */
+  total?: number
+  message?: string
+  /** 接收完成后的保存路径 */
+  savePath?: string
+  /** 传输文件名 */
+  name?: string
+}
+
 /** 预设常用波特率 */
 export const BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
-
-export const RDP_RESOLUTIONS = [
-  '1024x768',
-  '1280x720',
-  '1280x800',
-  '1366x768',
-  '1440x900',
-  '1600x900',
-  '1920x1080',
-  '2560x1440'
-]

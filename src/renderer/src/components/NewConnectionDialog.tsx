@@ -4,7 +4,6 @@ import {
   ConnectionProfile,
   NewProfileInput,
   ProtocolType,
-  RDP_RESOLUTIONS,
   SerialPortInfo,
   SSHProfile,
   SerialProfile,
@@ -35,11 +34,13 @@ const DEFAULT_SSH: SSHProfile = {
   authType: 'password',
   password: '',
   privateKeyPath: '',
-  passphrase: ''
+  passphrase: '',
+  startupCommand: ''
 }
 
 const DEFAULT_SERIAL: SerialProfile = {
   path: '',
+  mode: 'local',
   baudRate: 115200,
   dataBits: 8,
   stopBits: 1,
@@ -62,8 +63,7 @@ const DEFAULT_RDP: RDPProfile = {
   port: 3389,
   username: '',
   password: '',
-  domain: '',
-  resolution: '1280x800'
+  domain: ''
 }
 
 export default function NewConnectionDialog({
@@ -106,18 +106,39 @@ export default function NewConnectionDialog({
     if (path) setSsh((prev) => ({ ...prev, privateKeyPath: path }))
   }
 
-  const submit = (): void => {
-    if (!name.trim()) {
-      setError('请输入连接名称')
-      return
+  /** 名称留空时按协议自动生成默认名：SSH/VNC/RDP → host:port；串口本机 →
+   *  串口设备路径、网络(TCP) → hostIP:port */
+  const autoName = (): string => {
+    if (protocol === 'serial') {
+      if (serial.mode === 'tcp') return `${(serial.host ?? '').trim()}:${serial.port ?? ''}`
+      return serial.path.trim()
     }
+    if (protocol === 'ssh') return `${ssh.host.trim()}:${ssh.port}`
+    if (protocol === 'vnc') return `${vnc.host.trim()}:${vnc.port}`
+    if (protocol === 'rdp') return `${rdp.host.trim()}:${rdp.port}`
+    return ''
+  }
+
+  const submit = (): void => {
+    // 先校验各协议必填项（名称允许留空，留空则保存时自动生成）
     if (protocol === 'ssh' && !ssh.host.trim()) {
       setError('请输入主机地址')
       return
     }
-    if (protocol === 'serial' && !serial.path.trim()) {
-      setError('请选择串口设备')
-      return
+    if (protocol === 'serial') {
+      if (serial.mode === 'tcp') {
+        if (!serial.host?.trim()) {
+          setError('请输入主机/IP')
+          return
+        }
+        if (!serial.port) {
+          setError('请输入端口')
+          return
+        }
+      } else if (!serial.path.trim()) {
+        setError('请选择串口设备')
+        return
+      }
     }
     if (protocol === 'vnc' && !vnc.host.trim()) {
       setError('请输入 VNC 主机地址')
@@ -127,9 +148,14 @@ export default function NewConnectionDialog({
       setError('请输入 RDP 主机地址')
       return
     }
+    const finalName = name.trim() || autoName()
+    if (!finalName) {
+      setError('请输入连接名称')
+      return
+    }
     onSave(
       {
-        name: name.trim(),
+        name: finalName,
         protocol,
         ssh: protocol === 'ssh' ? ssh : undefined,
         serial: protocol === 'serial' ? serial : undefined,
@@ -182,7 +208,7 @@ export default function NewConnectionDialog({
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如：生产服务器 / 开发板"
+              placeholder="留空自动用 主机:端口 命名（串口用设备路径）"
             />,
             true
           )}
@@ -277,11 +303,178 @@ export default function NewConnectionDialog({
                   )}
                 </>
               )}
+              {field(
+                '连接后自动执行命令 (可选)',
+                <input
+                  value={ssh.startupCommand ?? ''}
+                  onChange={(e) =>
+                    setSsh({ ...ssh, startupCommand: e.target.value })
+                  }
+                  placeholder="如：cd /var/log && ls -lt | head"
+                />,
+                true
+              )}
             </>
           )}
 
           {protocol === 'serial' && (
             <>
+              {field(
+                '连接类型',
+                <select
+                  value={serial.mode ?? 'local'}
+                  onChange={(e) =>
+                    setSerial({
+                      ...serial,
+                      mode: e.target.value as SerialProfile['mode']
+                    })
+                  }
+                >
+                  <option value="local">本机串口</option>
+                  <option value="tcp">网络串口 (TCP)</option>
+                </select>
+              )}
+              {serial.mode === 'tcp' ? (
+                <>
+                  <div className="form-row">
+                    {field(
+                      '主机/IP',
+                      <input
+                        value={serial.host ?? ''}
+                        placeholder="如 192.168.1.100"
+                        onChange={(e) =>
+                          setSerial({ ...serial, host: e.target.value })
+                        }
+                      />
+                    )}
+                    {field(
+                      '端口',
+                      <input
+                        type="number"
+                        value={serial.port ?? ''}
+                        placeholder="如 2000"
+                        onChange={(e) =>
+                          setSerial({
+                            ...serial,
+                            port: Number(e.target.value) || undefined
+                          })
+                        }
+                      />
+                    )}
+                  </div>
+                  <label className="form-field checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={serial.rfc2217 === true}
+                      onChange={(e) =>
+                        setSerial({ ...serial, rfc2217: e.target.checked })
+                      }
+                    />
+                    启用 RFC2217（连接时向设备端下发波特率/流控等参数）
+                  </label>
+                  {serial.rfc2217 ? (
+                    <>
+                      <div className="form-row">
+                        {field(
+                          '波特率',
+                          <select
+                            value={serial.baudRate}
+                            onChange={(e) =>
+                              setSerial({
+                                ...serial,
+                                baudRate: Number(e.target.value)
+                              })
+                            }
+                          >
+                            {BAUD_RATES.map((b) => (
+                              <option key={b} value={b}>
+                                {b}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {field(
+                          '数据位',
+                          <select
+                            value={serial.dataBits}
+                            onChange={(e) =>
+                              setSerial({
+                                ...serial,
+                                dataBits: Number(
+                                  e.target.value
+                                ) as SerialProfile['dataBits']
+                              })
+                            }
+                          >
+                            {[5, 6, 7, 8].map((d) => (
+                              <option key={d} value={d}>
+                                {d}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                      <div className="form-row">
+                        {field(
+                          '停止位',
+                          <select
+                            value={serial.stopBits}
+                            onChange={(e) =>
+                              setSerial({
+                                ...serial,
+                                stopBits: Number(
+                                  e.target.value
+                                ) as SerialProfile['stopBits']
+                              })
+                            }
+                          >
+                            <option value={1}>1</option>
+                            <option value={2}>2</option>
+                          </select>
+                        )}
+                        {field(
+                          '校验位',
+                          <select
+                            value={serial.parity}
+                            onChange={(e) =>
+                              setSerial({
+                                ...serial,
+                                parity: e.target.value as SerialProfile['parity']
+                              })
+                            }
+                          >
+                            <option value="none">None</option>
+                            <option value="even">Even</option>
+                            <option value="odd">Odd</option>
+                          </select>
+                        )}
+                      </div>
+                      {field(
+                        '流控',
+                        <select
+                          value={serial.flowControl}
+                          onChange={(e) =>
+                            setSerial({
+                              ...serial,
+                              flowControl: e.target.value as SerialProfile['flowControl']
+                            })
+                          }
+                        >
+                          <option value="none">无</option>
+                          <option value="hardware">硬件 (RTS/CTS)</option>
+                          <option value="software">软件 (XON/XOFF)</option>
+                        </select>,
+                        true
+                      )}
+                    </>
+                  ) : (
+                    <p className="form-tip">
+                      未启用 RFC2217：波特率/流控等由设备端转发服务（ser2net/socat）决定，本端无需设置
+                    </p>
+                  )}
+                </>
+              ) : (
+                <>
               {field(
                 '串口设备',
                 <div className="file-pick">
@@ -389,6 +582,8 @@ export default function NewConnectionDialog({
                   <option value="software">软件 (XON/XOFF)</option>
                 </select>,
                 true
+              )}
+                </>
               )}
             </>
           )}
@@ -510,20 +705,6 @@ export default function NewConnectionDialog({
                   value={rdp.password}
                   onChange={(e) => setRdp({ ...rdp, password: e.target.value })}
                 />,
-                true
-              )}
-              {field(
-                '分辨率',
-                <select
-                  value={rdp.resolution}
-                  onChange={(e) => setRdp({ ...rdp, resolution: e.target.value })}
-                >
-                  {RDP_RESOLUTIONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>,
                 true
               )}
             </>

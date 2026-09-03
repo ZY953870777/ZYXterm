@@ -195,6 +195,15 @@ export class SSHSession implements BaseSession {
           })
           this.setStatus('connected')
           done()
+          // 连接成功后自动执行用户自定义命令（稍等 shell 提示符就绪后再回车执行）
+          const startup = (cfg.startupCommand ?? '').trim()
+          if (startup) {
+            setTimeout(() => {
+              if (this.stream && !this.stream.destroyed) {
+                this.stream.write(startup + '\r')
+              }
+            }, 600)
+          }
           void this.initCwd()
         })
       })

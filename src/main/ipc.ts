@@ -1,7 +1,8 @@
-import { BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import { randomUUID } from 'crypto'
-import { promises as fsp } from 'fs'
+import { appendFileSync, promises as fsp } from 'fs'
 import { ConnectionManager } from './connections/manager'
+import { SerialSession } from './connections/serial'
 import { SSHSession } from './connections/ssh'
 import { RDPSession2, isAddonAvailable } from './connections/rdp2'
 import { getSerialPortModule } from './serialport-loader'
@@ -12,6 +13,7 @@ import {
   ConnectionProfile,
   NewProfileInput,
   ProtocolType,
+  SerialMacroStep,
   SerialPortInfo
 } from '@shared/types'
 
@@ -25,6 +27,18 @@ export function registerIpc(
   ipcMain.on('updater:check', () => checkForUpdates())
   ipcMain.on('updater:download', () => downloadUpdate())
   ipcMain.on('updater:install', () => quitAndInstall())
+
+  // 临时调试：渲染层日志写入 userData/debug.log（排查弹窗滚动/焦点等 UI 问题）
+  ipcMain.on('debug:log', (_e, msg: string) => {
+    try {
+      appendFileSync(
+        app.getPath('userData') + '/debug.log',
+        new Date().toISOString() + ' ' + String(msg) + '\n'
+      )
+    } catch {
+      /* ignore */
+    }
+  })
 
   // ---------- 通用 ----------
   ipcMain.handle('dialog:selectFile', async () => {
@@ -113,7 +127,9 @@ export function registerIpc(
     const { mod } = getSerialPortModule()
     if (!mod) return []
     try {
-      const ports = (await mod.list()) as Array<{
+      const listFn = mod.list
+      if (typeof listFn !== 'function') return []
+      const ports = (await listFn()) as Array<{
         path: string
         manufacturer?: string
         serialNumber?: string
@@ -131,6 +147,83 @@ export function registerIpc(
       console.error('枚举串口失败:', e)
       return []
     }
+  })
+
+  // ---------- 串口 XMODEM 文件传输 ----------
+  const serialSession = (id: string): SerialSession | null => {
+    const s = manager.get(id)
+    return s && s.profile.protocol === 'serial' ? (s as SerialSession) : null
+  }
+  // 发送：选本地文件后经 XMODEM 发给设备（对端需先执行 rx/sb -k 接收）。
+  // defaultPath 为上次选中的路径（对话框默认定位到该目录/文件）
+  ipcMain.handle('serial:xmodem-send', async (_e, id: string, defaultPath?: string) => {
+    const s = serialSession(id)
+    if (!s) return { ok: false, error: '会话不可用' }
+    if (s.status !== 'connected') return { ok: false, error: '串口未连接' }
+    const res = await dialog.showOpenDialog({
+      title: '选择要发送的文件（XMODEM）',
+      defaultPath: defaultPath && defaultPath.trim() ? defaultPath : undefined,
+      properties: ['openFile']
+    })
+    if (res.canceled || !res.filePaths[0]) return { ok: false, error: '已取消' }
+    const file = res.filePaths[0]
+    const r = s.xmodemSend(file)
+    return r.ok ? { ok: true, path: file } : r
+  })
+  // 接收：选保存路径后进入 XMODEM 接收（对端需先执行 sz -k 文件名发送）。
+  // defaultPath 为上次保存路径（默认填入）
+  ipcMain.handle('serial:xmodem-receive', async (_e, id: string, defaultPath?: string) => {
+    const s = serialSession(id)
+    if (!s) return { ok: false, error: '会话不可用' }
+    if (s.status !== 'connected') return { ok: false, error: '串口未连接' }
+    const res = await dialog.showSaveDialog({
+      title: '保存接收的文件（XMODEM）',
+      defaultPath: defaultPath && defaultPath.trim() ? defaultPath : 'xmodem_received.bin'
+    })
+    if (res.canceled || !res.filePath) return { ok: false, error: '已取消' }
+    const savePath = res.filePath
+    const r = s.xmodemReceive(savePath)
+    return r.ok ? { ok: true, path: savePath } : r
+  })
+  ipcMain.on('serial:xmodem-cancel', (_e, id: string) => {
+    serialSession(id)?.cancelXmodem()
+  })
+
+  // ---------- 串口实时日志（用户自定义保存路径，实时追加） ----------
+  // 开启：弹保存对话框（默认填入上次路径）→ 实时记录串口接收数据
+  ipcMain.handle('serial:log-start', async (_e, id: string, defaultPath?: string) => {
+    const s = serialSession(id)
+    if (!s) return { ok: false, error: '会话不可用' }
+    if (s.status !== 'connected') return { ok: false, error: '串口未连接' }
+    if (s.logState().logging) return { ok: false, error: '日志已在记录中' }
+    const res = await dialog.showSaveDialog({
+      title: '保存串口实时日志（追加模式）',
+      defaultPath: defaultPath && defaultPath.trim() ? defaultPath : 'serial.log'
+    })
+    if (res.canceled || !res.filePath) return { ok: false, error: '已取消' }
+    const r = s.logStart(res.filePath)
+    return r.ok ? { ok: true, path: res.filePath } : r
+  })
+  ipcMain.handle('serial:log-stop', (_e, id: string) => {
+    serialSession(id)?.logStop()
+    return { ok: true }
+  })
+  ipcMain.handle('serial:log-state', (_e, id: string) => {
+    return serialSession(id)?.logState() ?? { logging: false }
+  })
+
+  // ---------- 串口自动化脚本（TX/RX/SLEEP） ----------
+  ipcMain.handle(
+    'serial:macro-start',
+    (_e, id: string, run: { steps: SerialMacroStep[]; loop: number }) => {
+      const s = serialSession(id)
+      if (!s) return { ok: false, error: '会话不可用' }
+      const steps = Array.isArray(run?.steps) ? run.steps : []
+      return s.macroStart({ steps, loop: Number(run?.loop) || 1 })
+    }
+  )
+  ipcMain.on('serial:macro-stop', (_e, id: string) => {
+    serialSession(id)?.macroStop()
   })
 
   // ---------- VNC / RDP WebSocket 端点 ----------

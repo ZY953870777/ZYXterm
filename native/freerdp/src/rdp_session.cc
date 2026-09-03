@@ -23,6 +23,7 @@
 #include <napi.h>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -369,15 +370,23 @@ static BOOL post_connect(freerdp* instance) {
 static void post_disconnect(freerdp* instance) { (void)instance; }
 
 // ---------- 工作线程 ----------
-static void worker_main(std::shared_ptr<SessionData> data) {
-  const RdpConfig& cfg = data->cfg;
 
+// FreeRDP 连接错误码：ERRCONNECT_CONNECT_TRANSPORT_FAILED = 0x0002000D。
+// 注：个别版本头文件未导出该宏或定义不一致，统一用字面量比较/赋值。
+
+// 建立一次 RDP 连接。成功返回已连接的 instance（调用方负责事件循环与清理）；
+// 失败时自行清理（unregister/context_free/freerdp_free）并把错误码写入 out_code，
+// 返回 nullptr。
+static freerdp* attempt_connect(std::shared_ptr<SessionData> data, bool force_rdp,
+                                UINT32* out_code) {
+  const RdpConfig& cfg = data->cfg;
+  if (out_code) *out_code = 0;
   emit(data.get(), "status", "connecting");
 
   rdpSettings* settings = freerdp_settings_new(0);
   if (!settings) {
-    emit(data.get(), "error", "freerdp_settings_new 失败");
-    return;
+    if (out_code) *out_code = 0x0002000D;
+    return nullptr;
   }
 
   freerdp_settings_set_string(settings, FreeRDP_ServerHostname, cfg.host.c_str());
@@ -391,22 +400,43 @@ static void worker_main(std::shared_ptr<SessionData> data) {
   freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, cfg.height);
   freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
-  // 使用默认安全层协商（NLA/TLS），与 Linux 行为一致
+  // 默认使用自动安全层协商（NLA/TLS），与 Linux 行为一致
   // （注：3.23.0 曾强制 TLS 规避 Windows NLA 崩溃；升级 3.30.0 后崩溃已修复，
-  //  且强制 TLS 会导致部分服务器 "transport layer failed"，故恢复默认协商）
+  //  且强制 TLS 会导致部分服务器 "transport layer failed"，故恢复默认协商）。
+  // force_rdp=true 时（自动协商失败后的回退）强制只走旧式 RDP 标准安全(RC4)；
+  // 仅允许该安全层的服务器必须用全新连接直连才能成功。
+  bool rdpOnly = force_rdp;
+  bool tlsOnly = false;
+  bool nlaOnly = false;
+  bool applySec = force_rdp;
+  if (!force_rdp) {
+    // 排障/兼容开关：环境变量 ZYX_RDP_SEC = auto|rdp|tls|nla（缺省 auto）
+    const char* sec = std::getenv("ZYX_RDP_SEC");
+    if (sec) {
+      rdpOnly = strncmp(sec, "rdp", 3) == 0;
+      tlsOnly = strncmp(sec, "tls", 3) == 0;
+      nlaOnly = strncmp(sec, "nla", 3) == 0;
+      applySec = rdpOnly || tlsOnly || nlaOnly;
+    }
+  }
+  if (applySec) {
+    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, rdpOnly);
+    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, tlsOnly);
+    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, nlaOnly);
+  }
 
   freerdp* instance = freerdp_new();
   if (!instance) {
     freerdp_settings_free(settings);
-    emit(data.get(), "error", "freerdp_new 失败");
-    return;
+    if (out_code) *out_code = 0x0002000D;
+    return nullptr;
   }
 
   if (!freerdp_context_new_ex(instance, settings)) {
     freerdp_settings_free(settings);
     freerdp_free(instance);
-    emit(data.get(), "error", "freerdp_context_new 失败");
-    return;
+    if (out_code) *out_code = 0x0002000D;
+    return nullptr;
   }
   data->instance = instance;
   register_session(instance, data);
@@ -424,18 +454,38 @@ static void worker_main(std::shared_ptr<SessionData> data) {
   }
 
   if (!freerdp_connect(instance)) {
-    std::string msg = "freerdp_connect 失败";
     UINT32 code = freerdp_get_last_error(instance->context);
+    if (out_code) *out_code = code;
+    unregister_session(instance);
+    freerdp_context_free(instance);
+    freerdp_free(instance);
+    data->instance = nullptr;
+    return nullptr;
+  }
+  return instance;
+}
+
+static void worker_main(std::shared_ptr<SessionData> data) {
+  // 首次按默认(auto)协商连接；绝大多数服务器（含 TLS/NLA）一次成功。
+  UINT32 code = 0;
+  freerdp* instance = attempt_connect(data, false, &code);
+
+  // 自动回退：部分服务器仅允许旧式"RDP 标准安全(RC4)"（拒绝 TLS/NLA），
+  // FreeRDP 在同一连接上的回退有缺陷（SSL_NOT_ALLOWED_BY_SERVER 后
+  // invalid packet signature → transport layer failed）；用全新连接直连
+  // RDP 标准安全可成功。仅当首次失败确属传输层错误时才触发，避免掩盖
+  // 认证失败等其它错误（例如凭据错误不会走到这里）。
+  if (!instance && code == 0x0002000D) {
+    instance = attempt_connect(data, true, &code);
+  }
+  if (!instance) {
+    std::string msg = "freerdp_connect 失败";
     const char* estr = freerdp_get_last_error_string(code);
     if (estr) {
       msg += ": ";
       msg += estr;
     }
     emit(data.get(), "error", msg);
-    unregister_session(instance);
-    freerdp_context_free(instance);
-    freerdp_free(instance);
-    data->instance = nullptr;
     return;
   }
 

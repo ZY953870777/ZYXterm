@@ -9,20 +9,25 @@
  *
  * 这里改为 try/catch 懒加载：加载失败时返回错误信息，调用方优雅降级，
  * 应用仍可正常启动；SSH / VNC / RDP 不受影响，串口功能提示不可用。
+ *
+ * 兼容性：serialport v13 的 `list` 是 `SerialPort` 的**静态方法**（不在包顶层），
+ * 这里统一绑定为模块层的 `mod.list`，调用方无需关心版本差异。
  */
 
 /** serialport 端口实例的最小接口 */
 export interface SerialPortInstance {
   isOpen: boolean
   open(cb: (err?: Error) => void): void
-  write(data: string): void
+  /** 兼容字符串与二进制（XMODEM 帧为原始 Buffer） */
+  write(data: string | Uint8Array): void
   close(cb?: () => void): void
   on(event: string, listener: (...args: any[]) => void): void
 }
 
 interface SerialPortModule {
   SerialPort: new (options: Record<string, unknown>) => SerialPortInstance
-  list: (options?: unknown) => Promise<unknown[]>
+  /** 枚举串口（serialport v10+ 为 SerialPort 的静态方法，绑定到模块层；缺失时调用方降级） */
+  list?: (options?: unknown) => Promise<unknown[]>
 }
 
 interface LoadResult {
@@ -36,8 +41,25 @@ export function getSerialPortModule(): LoadResult {
   if (cached) return cached
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const m = require('serialport') as SerialPortModule
-    cached = { mod: m, error: null }
+    const raw = require('serialport') as Record<string, unknown>
+    // serialport v13：SerialPort 为命名导出（兼容 default 导出/直接导出模块）
+    const SerialPortCtor = (raw.SerialPort ??
+      raw.default ??
+      raw) as unknown as new (options: Record<string, unknown>) => SerialPortInstance
+    if (typeof SerialPortCtor !== 'function') {
+      throw new Error('serialport 未导出 SerialPort 构造器')
+    }
+    // 枚举端口是 SerialPort 的静态方法，绑定 this 后统一为 mod.list
+    const listRaw = (
+      SerialPortCtor as unknown as { list?: (options?: unknown) => Promise<unknown[]> }
+    ).list
+    cached = {
+      mod: {
+        SerialPort: SerialPortCtor,
+        list: listRaw ? listRaw.bind(SerialPortCtor) : undefined
+      },
+      error: null
+    }
   } catch (e) {
     cached = { mod: null, error: (e as Error).message }
     console.warn('[serialport] 原生模块不可用（串口功能将被禁用）:', cached.error)

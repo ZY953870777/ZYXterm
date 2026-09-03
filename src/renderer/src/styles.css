@@ -394,8 +394,23 @@ button {
   border-bottom: none;
 }
 
+/* tab 多到放不下时：常驻可见的水平滚动条（可拖动，也提示"还有更多 tab"） */
 .tabs::-webkit-scrollbar {
-  height: 4px;
+  height: 6px;
+}
+.tabs::-webkit-scrollbar-track {
+  background: var(--bg-sidebar);
+}
+.tabs::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+.tabs {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 
 .empty-tabs {
@@ -647,6 +662,39 @@ button {
   background: var(--bg-hover);
 }
 
+/* 标签栏左右滚动箭头（溢出时显示；sticky 钉在可视边缘，可点击回看被挤出的 tab） */
+.tab-arrow {
+  flex: 0 0 auto;
+  align-self: center;
+  position: sticky;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  margin: 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.tab-arrow-left {
+  left: 2px;
+}
+.tab-arrow-right {
+  right: 2px;
+}
+.tab-arrow:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
 /* ============ 标签右键菜单 ============ */
 .tab-menu-mask {
   position: fixed;
@@ -735,14 +783,40 @@ button {
 .quick-dialog {
   width: 560px;
   max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 60px);
 }
 
+/* 覆盖 .dialog-body 的 flex:1：快捷列表以自身高度滚动，不依赖父级 flex 收缩。
+   注意：.dialog-body 与 .quick-body 是同一元素，此处不能设 overflow:hidden，
+   否则会禁用下方 .quick-body 自身的 overflow-y:auto 滚动（正是之前"截断却滚
+   不动"的原因）。 */
+.quick-dialog .dialog-body {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 快捷列表不自限高、不自滚动：由外层 .quick-dialog 作为唯一滚动区整体滚动，
+   滚动条明显、底部始终可达（修复“超高被截断却滚不动/看不到滚动条”）。 */
 .quick-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 62vh;
-  overflow-y: auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+  padding-bottom: 6px;
+}
+
+.quick-body::-webkit-scrollbar {
+  width: 8px;
+}
+.quick-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.quick-body::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 
 .quick-group {
@@ -806,6 +880,155 @@ button {
   flex: 1;
   min-height: 0;
   padding: 4px 0 0 8px;
+}
+
+/* ============ 串口 XMODEM 文件传输工具条 / 进度 ============ */
+.serial-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.serial-layout > .terminal-wrap {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+.serial-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border);
+}
+.serial-toolbar-title {
+  font-weight: 600;
+  margin-right: 4px;
+}
+.tool-btn {
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.tool-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tool-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.tool-btn.danger {
+  color: var(--red);
+  border-color: var(--border);
+}
+.tool-btn.danger:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red);
+}
+.xmodem-result {
+  font-weight: 600;
+  color: var(--green);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 工具条右侧分组（结果提示 + 日志开关 + 当前日志路径） */
+.serial-toolbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tool-btn.active {
+  border-color: var(--green);
+  color: var(--green);
+}
+.serial-log-path {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--bg);
+}
+.serial-log-path::before {
+  content: '记录到 ';
+  color: var(--text-dim);
+}
+.xmodem-result.error {
+  color: var(--red);
+}
+.xmodem-result.cancel {
+  color: var(--yellow);
+}
+.xmodem-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.xmodem-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.xmodem-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xmodem-dir {
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+.xmodem-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.xmodem-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+  border-radius: 3px;
+}
+.xmodem-fill.indeterminate {
+  width: 30%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: xmodem-slide 1.2s infinite linear;
+}
+@keyframes xmodem-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
 }
 
 /* ============ SSH 增强视图（文件树 / 历史 / 快捷命令 / 补全） ============ */
@@ -1394,6 +1617,14 @@ button {
   z-index: 100;
 }
 
+/* 表单下方的说明性提示（如网络串口参数说明） */
+.form-tip {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
 .dialog {
   width: 540px;
   max-width: calc(100vw - 40px);
@@ -1484,6 +1715,17 @@ button {
   color: var(--text);
   padding: 7px 9px;
   outline: none;
+}
+
+/* 滑块（range）不套用普通输入框的 padding/border，否则 track 偏移导致
+   滑块无法滑到最左/最右 */
+.form-field input[type='range'] {
+  padding: 0;
+  border: none;
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+  align-self: center;
 }
 
 .form-field input:focus,
@@ -1663,4 +1905,383 @@ button {
   height: 100%;
   background: var(--accent);
   transition: width 0.2s;
+}
+
+/* ============ 自绘确认框（替代原生 window.confirm，避免夺焦后不归还） ============ */
+.confirm-dialog {
+  width: 380px;
+  max-width: calc(100vw - 40px);
+}
+.confirm-text {
+  margin: 0 0 16px;
+  color: var(--text);
+  line-height: 1.6;
+  word-break: break-word;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 快捷选择框：整个弹窗作为唯一滚动区（超高时滚动到底，底部不会截断） */
+.quick-dialog {
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+.quick-dialog::-webkit-scrollbar {
+  width: 8px;
+}
+.quick-dialog::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.quick-dialog::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* 顶部协议页签 + 搜索 */
+.quick-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 18px 0;
+}
+.quick-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.quick-tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.quick-tab.active {
+  background: var(--bg);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.qt-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.quick-tab.active .qt-count {
+  color: var(--accent);
+}
+.quick-search {
+  padding: 10px 18px 0;
+}
+.quick-search input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+}
+.quick-search input:focus {
+  border-color: var(--accent);
+}
+.quick-body-wrap .quick-body {
+  padding-top: 12px;
+}
+.quick-body .profile-sub {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+.quick-group .profile-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============ 串口自动化脚本 ============ */
+.macro-chip {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.macro-dialog {
+  width: 720px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+.macro-dialog .dialog-body {
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+}
+.macro-side {
+  width: 180px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
+}
+.macro-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.macro-item:hover {
+  background: var(--bg-hover);
+}
+.macro-item.active {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+.macro-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.macro-loop {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.macro-loop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.macro-loop-row input[type='number'] {
+  width: 84px;
+}
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.macro-new {
+  margin-top: 4px;
+}
+.macro-edit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.macro-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 160px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+}
+.macro-edit textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.macro-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.macro-hint code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 3px;
+  color: var(--accent);
+}
+.macro-parse {
+  font-size: 11px;
+  min-height: 16px;
+}
+.macro-ok {
+  color: var(--green);
+  word-break: break-all;
+}
+.macro-err {
+  color: var(--red);
+}
+.macro-status {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.macro-status.running {
+  color: var(--yellow);
+}
+.macro-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px;
+}
+
+/* 自绘弹窗：危险操作（删除等）的确定按钮用红色 */
+.btn-primary.confirm-danger {
+  background: var(--red);
+}
+.btn-primary.confirm-danger:hover {
+  filter: brightness(1.1);
+}
+
+/* ============ 串口自动化：运行分组按钮 / 进度页 ============ */
+.macro-run-group {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.macro-run-main {
+  border: none;
+  border-radius: 0;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.macro-run-stop {
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  padding: 3px 8px;
+}
+
+.macro-progress {
+  width: 620px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+.macro-progress .dialog-body {
+  min-height: 0;
+}
+.mp-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.mp-state {
+  font-weight: 600;
+}
+.mp-state.running {
+  color: var(--yellow);
+}
+.mp-state.done {
+  color: var(--green);
+}
+.mp-state.stopped {
+  color: var(--yellow);
+}
+.mp-state.error {
+  color: var(--red);
+}
+.mp-state.idle {
+  color: var(--text-dim);
+}
+.mp-loop,
+.mp-iter {
+  color: var(--text-dim);
+}
+.mp-cur {
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+.mp-cur.err {
+  color: var(--red);
+}
+.mp-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.mp-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+  border-radius: 3px;
+}
+.mp-lines {
+  max-height: 48vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 4px 0;
+}
+.macro-line {
+  display: flex;
+  gap: 8px;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.macro-line.done {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.macro-line.current {
+  background: rgba(122, 162, 247, 0.14);
+  color: var(--accent);
+}
+.macro-line.note {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.mp-mark {
+  flex: 0 0 16px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.macro-line.done .mp-mark {
+  color: var(--green);
+}
+.macro-line.current .mp-mark {
+  color: var(--yellow);
+}
+.macro-line code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
 }

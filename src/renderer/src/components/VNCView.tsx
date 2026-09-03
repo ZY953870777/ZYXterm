@@ -68,8 +68,11 @@ export default function VNCView({ tab }: Props) {
       credentials: cfg.password ? { password: cfg.password } : {},
       shared: true,
       viewOnly: cfg.viewOnly,
+      // 画质：JPEG 质量（0-9，9 最高）。仅在服务器使用 Tight 编码并支持 JPEG 时生效；
+      // 若服务器只支持 Hextile/Raw/ZRLE 等编码，画质设置无效（VNC 协议限制）
       qualityLevel: cfg.quality ?? 6,
-      compressionLevel: cfg.quality ?? 6
+      // 压缩级别单独固定为 novnc 默认 2（与画质无关，避免过高压缩导致画面发糊）
+      compressionLevel: 2
     })
     rfbRef.current = rfb
 
