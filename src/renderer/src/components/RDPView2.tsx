@@ -15,6 +15,13 @@ const PTR_WHEEL = 0x0200
 const PTR_WHEEL_NEGATIVE = 0x0100
 const WHEEL_ROTATION = 0x78 // 120：标准一个滚轮刻度
 
+// 扩展鼠标按键（侧键：后退/前进）。RDP 基础鼠标事件只有左/中/右三键，
+// 侧键必须用 PTR_XFLAGS_* 走 extended mouse event（freerdp_input_send_
+// extended_mouse_event），否则会被服务器当成左/右/中键点击。
+const PTR_XFLAGS_DOWN = 0x8000
+const PTR_XFLAGS_BUTTON1 = 0x0001 // 后退（浏览器 MouseEvent.button = 3）
+const PTR_XFLAGS_BUTTON2 = 0x0002 // 前进（浏览器 MouseEvent.button = 4）
+
 // RDP Set1 扫描码。扩展键（方向键/编辑键/小键盘 Enter、/ 等）必须带
 // KBD_FLAGS_EXTENDED(0x100) 标记，否则与同值的小键盘键冲突：
 // 如 ArrowUp=0x48 与 Numpad8=0x48 相同，不带标记按↑会被当作小键盘 8 输出。
@@ -309,7 +316,24 @@ export default function RDPView2({ tab }: Props) {
     window.api.rdpInput(tab.sessionId, { type: 'mouse', x, y, flags })
   }
 
+  const sendExtendedMouse = (x: number, y: number, flags: number): void => {
+    window.api.rdpInput(tab.sessionId, { type: 'xmouse', x, y, flags })
+  }
+
+  /** 鼠标侧键：button 3=后退、4=前进 → PTR_XFLAGS_BUTTON1/2（扩展鼠标事件） */
+  const handleSideButton = (e: React.MouseEvent, down: boolean): boolean => {
+    if (e.button !== 3 && e.button !== 4) return false
+    // 阻止 Chromium 把侧键当作页面前进/后退
+    e.preventDefault()
+    const { x, y } = toLogical(e)
+    const btn = e.button === 3 ? PTR_XFLAGS_BUTTON1 : PTR_XFLAGS_BUTTON2
+    sendExtendedMouse(x, y, (down ? PTR_XFLAGS_DOWN : 0) | btn)
+    return true
+  }
+
   const handleMouse = (e: React.MouseEvent, down: boolean): void => {
+    // 只处理左/中/右三键；侧键交给 handleSideButton（否则会被映射成左键）
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return
     const { x, y } = toLogical(e)
     const btnFlag = e.button === 2 ? PTR_BUTTON2 : e.button === 1 ? PTR_BUTTON3 : PTR_BUTTON1
     sendMouse(x, y, (down ? PTR_DOWN : 0) | btnFlag)
@@ -331,8 +355,18 @@ export default function RDPView2({ tab }: Props) {
           clearCursor() // 离开画布时擦除远程光标，避免残留
           mousePosRef.current = null
         }}
-        onMouseDown={(e) => handleMouse(e, true)}
-        onMouseUp={(e) => handleMouse(e, false)}
+        onMouseDown={(e) => {
+          if (handleSideButton(e, true)) return
+          handleMouse(e, true)
+        }}
+        onMouseUp={(e) => {
+          if (handleSideButton(e, false)) return
+          handleMouse(e, false)
+        }}
+        // 侧键在部分平台会再触发 auxclick（默认导航），一并拦截
+        onAuxClick={(e) => {
+          if (e.button === 3 || e.button === 4) e.preventDefault()
+        }}
         onWheel={(e) => {
           // RDP 滚轮：PTR_FLAGS_WHEEL + 方向标志 + 旋转量
           e.preventDefault()

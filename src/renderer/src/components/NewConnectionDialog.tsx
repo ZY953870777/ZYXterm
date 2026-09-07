@@ -9,8 +9,15 @@ import {
   SerialProfile,
   VNCProfile,
   VNCScaleMode,
+  VNCKeyMapping,
   RDPProfile
 } from '@shared/types'
+import {
+  DEFAULT_KEY_MAPPINGS,
+  eventToSourceSpec,
+  eventToTargetSpec,
+  isModifierKeyboardEvent
+} from '../keyMapping'
 
 interface Props {
   editProfile: ConnectionProfile | null
@@ -55,7 +62,9 @@ const DEFAULT_VNC: VNCProfile = {
   viewOnly: false,
   scaleView: true,
   quality: 6,
-  scaleMode: 'fill'
+  scaleMode: 'fill',
+  // 默认把鼠标侧键映射为 VS Code 的“后退/前进”；可按需增删任意映射
+  keyMappings: [...DEFAULT_KEY_MAPPINGS]
 }
 
 const DEFAULT_RDP: RDPProfile = {
@@ -176,6 +185,110 @@ export default function NewConnectionDialog({
       {control}
     </label>
   )
+
+  // ---------- VNC 自定义按键映射（可增删任意条） ----------
+  // 录制状态：{ 行号, 字段 }
+  const [recording, setRecording] = useState<{
+    index: number
+    field: 'from' | 'to'
+  } | null>(null)
+
+  const keyMappings = vnc.keyMappings ?? DEFAULT_VNC.keyMappings ?? []
+  const setKeyMappings = (list: VNCKeyMapping[]): void =>
+    setVnc({ ...vnc, keyMappings: list })
+  const addKeyMapping = (): void => {
+    setRecording(null)
+    setKeyMappings([...keyMappings, { from: '', to: '' }])
+  }
+  const updateKeyMapping = (i: number, patch: Partial<VNCKeyMapping>): void =>
+    setKeyMappings(keyMappings.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
+  const removeKeyMapping = (i: number): void => {
+    setRecording(null)
+    setKeyMappings(keyMappings.filter((_, idx) => idx !== i))
+  }
+
+  // 录制时在 window 捕获阶段直接识别按下的键盘组合/鼠标键
+  useEffect(() => {
+    if (!recording) return
+    const { index, field } = recording
+    const commit = (spec: string): void => {
+      setVnc((prev) => {
+        const list = prev.keyMappings ?? DEFAULT_VNC.keyMappings ?? []
+        return {
+          ...prev,
+          keyMappings: list.map((m, i) => {
+            if (i !== index) return m
+            return field === 'from' ? { ...m, from: spec } : { ...m, to: spec }
+          })
+        }
+      })
+      setRecording(null)
+    }
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setRecording(null)
+        return
+      }
+      if (isModifierKeyboardEvent(e)) {
+        // 只按了修饰键：等待主键，同时阻止快捷键触发
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
+      const spec =
+        field === 'from' ? eventToSourceSpec(e) : eventToTargetSpec(e)
+      if (!spec) return
+      e.preventDefault()
+      e.stopPropagation()
+      commit(spec)
+    }
+    const onMouseDown = (e: MouseEvent): void => {
+      // 目标只能是键盘组合；左键保留给正常 UI 操作（中键/右键/侧键可录制）
+      if (field !== 'from' || e.button === 0) return
+      const spec = eventToSourceSpec(e)
+      if (!spec) return
+      e.preventDefault()
+      e.stopPropagation()
+      // 录制结束后的 mouseup/auxclick/contextmenu 仍可能触发浏览器行为，
+      // 用一次性捕获监听把它们吞掉
+      const blockOnce = (ev: Event): void => {
+        ev.preventDefault()
+        ev.stopPropagation()
+      }
+      window.addEventListener('mouseup', blockOnce, { capture: true, once: true })
+      window.addEventListener('auxclick', blockOnce, { capture: true, once: true })
+      window.addEventListener('contextmenu', blockOnce, { capture: true, once: true })
+      commit(spec)
+    }
+    // 录制鼠标键时屏蔽右键菜单与侧键的浏览器前进/后退行为
+    const onContextMenu = (e: MouseEvent): void => {
+      if (field !== 'from') return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    const onAuxClick = (e: MouseEvent): void => {
+      if (field !== 'from') return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('mousedown', onMouseDown, true)
+    window.addEventListener('contextmenu', onContextMenu, true)
+    window.addEventListener('auxclick', onAuxClick, true)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('mousedown', onMouseDown, true)
+      window.removeEventListener('contextmenu', onContextMenu, true)
+      window.removeEventListener('auxclick', onAuxClick, true)
+    }
+  }, [recording])
+
+  // 切到其它协议时结束录制，避免继续吞全局按键
+  useEffect(() => {
+    if (protocol !== 'vnc' && recording) setRecording(null)
+  }, [protocol, recording])
 
   return (
     <div className="dialog-mask" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -657,6 +770,75 @@ export default function NewConnectionDialog({
                   只读模式
                 </label>
               </div>
+              <div className="form-field full keymap-field">
+                <span className="form-label">自定义按键映射</span>
+                {keyMappings.length === 0 && (
+                  <div className="keymap-empty">暂无映射</div>
+                )}
+                {keyMappings.map((m, i) => {
+                  const recFrom = recording?.index === i && recording.field === 'from'
+                  const recTo = recording?.index === i && recording.field === 'to'
+                  return (
+                    <div
+                      className={`keymap-row${recFrom || recTo ? ' recording' : ''}`}
+                      key={i}
+                    >
+                      <input
+                        value={m.from}
+                        onChange={(e) => updateKeyMapping(i, { from: e.target.value })}
+                        placeholder={
+                          recFrom ? '请按下键盘或鼠标键…' : '源：f12 / ctrl+alt+k'
+                        }
+                      />
+                      <button
+                        type="button"
+                        className={`keymap-record${recFrom ? ' active' : ''}`}
+                        title="点击后直接按下要识别的键"
+                        onClick={() =>
+                          setRecording(recFrom ? null : { index: i, field: 'from' })
+                        }
+                      >
+                        {recFrom ? '按键…' : '录制'}
+                      </button>
+                      <span className="keymap-arrow">→</span>
+                      <input
+                        value={m.to}
+                        onChange={(e) => updateKeyMapping(i, { to: e.target.value })}
+                        placeholder={
+                          recTo ? '请按下键盘组合…' : '目标：ctrl+shift+p'
+                        }
+                      />
+                      <button
+                        type="button"
+                        className={`keymap-record${recTo ? ' active' : ''}`}
+                        title="点击后按下目标组合键"
+                        onClick={() =>
+                          setRecording(recTo ? null : { index: i, field: 'to' })
+                        }
+                      >
+                        {recTo ? '按键…' : '录制'}
+                      </button>
+                      <button
+                        type="button"
+                        className="keymap-del"
+                        title="删除该映射"
+                        onClick={() => removeKeyMapping(i)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )
+                })}
+                <button type="button" className="keymap-add" onClick={addKeyMapping}>
+                  ＋ 添加映射
+                </button>
+              </div>
+              <div className="form-hint">
+                点“录制”后直接按键即可识别：源支持键盘组合或鼠标键（左键请手动
+                输入 mouse_left，录制使用中键/右键/侧键）；目标只支持键盘组合。
+                录制中按 Esc 取消。也可以手动填写，组合键用 + 连接、加号键写
+                plus，并支持 0x1234 / unicode:4e2d。
+              </div>
             </>
           )}
 
@@ -707,6 +889,16 @@ export default function NewConnectionDialog({
                 />,
                 true
               )}
+              <div className="form-row">
+                <label className="form-field checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={rdp.keepAwake ?? false}
+                    onChange={(e) => setRdp({ ...rdp, keepAwake: e.target.checked })}
+                  />
+                  屏幕常亮（空闲 2 分钟自动阻止远端锁定/息屏）
+                </label>
+              </div>
             </>
           )}
         </div>

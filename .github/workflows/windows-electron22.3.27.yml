@@ -1,0 +1,291 @@
+name: Build Windows Electron 22.3.27 installer + zip (Server 2012 R2)
+
+# Windows Server 2012 R2 内核为 Windows 8.1（NT 6.3）。Electron 23+ 随
+# Chromium 110 放弃 Win7/8/8.1，因此这里固定使用 Electron 22.3.27
+# （最后一个支持该系统的版本，Chromium 108 / Node 16），同时产出安装包与
+# 免安装 zip。
+#
+# 产物：
+#   dist/ZYXterm-Setup-<version>-electron22.3.27-win2012r2-x64.exe
+#   dist/ZYXterm-<version>-electron22.3.27-win2012r2-x64.zip
+# 不生成/不上传 latest.yml；legacy 客户端的 updater 也会在运行时被禁用
+# （见 src/main/updater.ts）。
+#
+# 触发：
+#   1. release.yml 在 tag / 手动发布时通过 workflow_call 调用，release_tag=auto 表示
+#      使用 package.json 版本对应的 v<version>，把产物追加到该 Release 草稿；
+#   2. 也可以手动运行，填写 release_tag 后追加到指定 Release；留空则只存 artifact。
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "可选：上传到 Release 的 tag（v0.1.4 / auto），留空则只存 Actions artifact"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release tag；auto = v<package.json version>；空 = 不附加"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-windows-electron22:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+
+    env:
+      FREERDP_VERSION: "3.30.0"
+      VCPKG_DEFAULT_TRIPLET: "x64-windows"
+      LEGACY_ELECTRON_VERSION: "22.3.27"
+      # 把 FreeRDP 的 API 基线固定到 Windows 8.1 / Server 2012 R2。
+      # 用 CL 环境变量追加宏，避免覆盖 CMake/MSVC 默认编译选项（如 /EHsc）。
+      CL: "/D_WIN32_WINNT=0x0603 /DWINVER=0x0603 /DNTDDI_VERSION=0x06030000"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.release_tag }}".Trim()
+          if ($tag -eq "auto") {
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            $tag = "v$version"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "release tag: $tag"
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      # ---------- 编译 FreeRDP 3（Win8.1 API 基线） ----------
+      - name: Install deps (vcpkg)
+        shell: pwsh
+        run: |
+          vcpkg install zlib:x64-windows openssl:x64-windows libusb:x64-windows
+
+      - name: Clone FreeRDP
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:FREERDP_VERSION `
+            https://github.com/FreeRDP/FreeRDP.git freerdp-src
+
+      - name: Configure FreeRDP (legacy Win8.1 baseline)
+        shell: pwsh
+        run: |
+          $cmakeArgs = @(
+            "-S", "freerdp-src", "-B", "build", "-G", "Visual Studio 17 2022", "-A", "x64",
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake",
+            "-DVCPKG_TARGET_TRIPLET=x64-windows",
+            "-DWITH_FFMPEG=OFF", "-DWITH_DSP_FFMPEG=OFF", "-DWITH_VIDEO_FFMPEG=OFF",
+            "-DWITH_SWSCALE=OFF", "-DWITH_CAIRO=OFF", "-DWITH_OPUS=OFF", "-DWITH_OPENH264=OFF",
+            "-DWITH_GSM=OFF", "-DWITH_LAME=OFF", "-DWITH_FAAD2=OFF", "-DWITH_FAAC=OFF",
+            "-DWITH_FDK_AAC=OFF", "-DWITH_SOXR=OFF",
+            "-DWITH_WAYLAND=OFF", "-DWITH_X11=OFF", "-DWITH_PULSE=OFF", "-DWITH_ALSA=OFF", "-DWITH_PCSC=OFF",
+            "-DWITH_SERVER=OFF", "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF",
+            "-DWITH_CLIENT=ON", "-DWITH_OPENSSL=ON", "-DWITH_ZLIB=ON",
+            "-DCMAKE_BUILD_TYPE=Release"
+          )
+          cmake @cmakeArgs
+
+      - name: Build FreeRDP
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      # ---------- 运行库 + MSVC CRT + UCRT ----------
+      - name: Package FreeRDP runtime
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          if (Test-Path "build/client/Windows/cli/Release/wfreerdp.exe") {
+            Copy-Item "build/client/Windows/cli/Release/wfreerdp.exe" $pkg -Force
+          }
+          Get-ChildItem build -Recurse -Filter *.dll | ForEach-Object {
+            Copy-Item $_.FullName $pkg -Force
+          }
+          $bin = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows\bin"
+          if (Test-Path $bin) {
+            Get-ChildItem $bin -Filter *.dll | ForEach-Object {
+              Copy-Item $_.FullName $pkg -Force
+            }
+          }
+
+      - name: Bundle MSVC runtime (app-local)
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          $roots = @()
+          if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
+          foreach ($vs in @("Enterprise", "Professional", "Community", "BuildTools")) {
+            $roots += "C:\Program Files\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+            $roots += "C:\Program Files (x86)\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+          }
+          $crt = $null
+          foreach ($r in $roots) {
+            if (-not $r -or -not (Test-Path $r)) { continue }
+            $hit = Get-ChildItem $r -Recurse -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'onecore' } |
+                   Select-Object -First 1
+            if ($hit) { $crt = $hit; break }
+          }
+          if (-not $crt) {
+            Write-Error "未找到 x64 MSVC CRT 目录（Microsoft.VC*.CRT）"
+            exit 1
+          }
+          Write-Host "MSVC CRT: $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" $pkg -Force
+
+      # Windows 7/8.1/Server 2012 R2 不预装 Universal CRT。把 UCRT 一并放到
+      # addon 同目录，降低目标机缺少 KB2999226 时加载失败的概率。
+      - name: Bundle Universal CRT (best-effort)
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          $kits = "C:\Program Files (x86)\Windows Kits\10\Redist"
+          if (-not (Test-Path $kits)) {
+            Write-Warning "未找到 Windows Kits Redist，跳过 UCRT"
+            exit 0
+          }
+          $ucrt = Get-ChildItem $kits -Recurse -Directory -Filter "ucrt" -ErrorAction SilentlyContinue |
+                  Where-Object { Test-Path (Join-Path $_.FullName "DLLs\x64") } |
+                  Select-Object -First 1
+          if (-not $ucrt) {
+            Write-Warning "未找到 UCRT x64 DLL 目录，跳过"
+            exit 0
+          }
+          $src = Join-Path $ucrt.FullName "DLLs\x64"
+          Write-Host "UCRT: $src"
+          Copy-Item "$src\*.dll" $pkg -Force
+
+      # ---------- 开发头文件 + import lib（供 addon 编译） ----------
+      - name: Package dev headers + libs
+        shell: pwsh
+        run: |
+          $tp = "native/freerdp/third_party/freerdp"
+          New-Item -ItemType Directory -Force -Path "$tp/include" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$tp/lib" | Out-Null
+          $devInclude = "package/freerdp/include"
+          New-Item -ItemType Directory -Force -Path $devInclude | Out-Null
+          if (Test-Path "freerdp-src/include") { Copy-Item "freerdp-src/include/*" $devInclude -Recurse -Force }
+          if (Test-Path "build/include") { Copy-Item "build/include/*" $devInclude -Recurse -Force }
+          if (Test-Path "freerdp-src/winpr/include") { Copy-Item "freerdp-src/winpr/include/*" $devInclude -Recurse -Force }
+          Get-ChildItem build -Recurse -Directory -Filter include | ForEach-Object {
+            Copy-Item "$($_.FullName)/*" $devInclude -Recurse -Force
+          }
+          $devLib = "package/freerdp/lib"
+          New-Item -ItemType Directory -Force -Path $devLib | Out-Null
+          Get-ChildItem build -Recurse -Filter *.lib | Copy-Item -Destination $devLib -Force
+          Copy-Item "$devInclude/*" "$tp/include" -Recurse -Force
+          Copy-Item "$devLib/*.lib" "$tp/lib" -Force
+
+      # ---------- 用 Electron 22 头文件编译 addon ----------
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Compile freerdp addon (Electron 22)
+        shell: pwsh
+        run: |
+          npm install --no-save --ignore-scripts node-addon-api node-gyp
+          npx node-gyp rebuild --directory=native/freerdp `
+            --target=$env:LEGACY_ELECTRON_VERSION --arch=x64 `
+            --dist-url=https://electronjs.org/headers
+          Copy-Item "native/freerdp/build/Release/freerdp.node" "resources/freerdp/freerdp.node" -Force
+
+      - name: Verify FreeRDP runtime package
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          $required = @("freerdp.node", "freerdp3.dll", "winpr3.dll", "vcruntime140.dll")
+          $missing = @()
+          foreach ($n in $required) {
+            if (-not (Test-Path (Join-Path $pkg $n))) { $missing += $n }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "resources/freerdp 缺少必需文件: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem $pkg | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize
+
+      # ---------- 安装依赖 + 构建 + 打 zip ----------
+      - name: Install project deps
+        run: npm ci --ignore-scripts
+
+      - name: Switch Electron to 22.3.27
+        shell: pwsh
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts "electron@$env:LEGACY_ELECTRON_VERSION"
+          node -e "console.log('electron:', require('electron/package.json').version)"
+
+      - name: Build app (Chrome 108 / Node 16 target)
+        run: npm run build
+
+      - name: Package Electron 22.3.27 installer + zip (no publish)
+        shell: pwsh
+        run: |
+          # package.json 的 win.target 已配置 nsis + zip，这里直接按配置构建两者
+          npx electron-builder --win --x64 --publish never
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $suffix = "electron${env:LEGACY_ELECTRON_VERSION}-win2012r2-x64"
+          $renames = @(
+            @{ from = "dist/ZYXterm-Setup-${version}.exe"; to = "dist/ZYXterm-Setup-${version}-${suffix}.exe" },
+            @{ from = "dist/ZYXterm-Setup-${version}.exe.blockmap"; to = "dist/ZYXterm-Setup-${version}-${suffix}.exe.blockmap" },
+            @{ from = "dist/ZYXterm-${version}-x64.zip"; to = "dist/ZYXterm-${version}-${suffix}.zip" }
+          )
+          foreach ($r in $renames) {
+            if (Test-Path $r.from) { Move-Item $r.from $r.to -Force }
+          }
+          # legacy 不发布自动更新元数据
+          Remove-Item "dist/latest.yml" -Force -ErrorAction SilentlyContinue
+          $required = @(
+            "dist/ZYXterm-Setup-${version}-${suffix}.exe",
+            "dist/ZYXterm-${version}-${suffix}.zip"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path $_) })
+          if ($missing.Count -gt 0) {
+            Write-Error "缺少 Electron $env:LEGACY_ELECTRON_VERSION 产物: $($missing -join ', ')"
+            Get-ChildItem dist -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+            exit 1
+          }
+          Get-ChildItem dist -Filter "*electron*-win2012r2*" | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload Electron 22.3.27 installer + zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zyxterm-windows-electron22.3.27-2012r2
+          path: |
+            dist/*electron*-win2012r2*.exe
+            dist/*electron*-win2012r2*.zip
+
+      - name: Attach to GitHub Release (draft, optional)
+        if: ${{ inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          $files = @(
+            Get-ChildItem dist -Filter "*electron*-win2012r2*" |
+              Where-Object { $_.Extension -in ".exe", ".zip" } |
+              ForEach-Object { $_.FullName }
+          )
+          if ($files.Count -eq 0) {
+            Write-Error "没有可上传的 Electron 22.3.27 产物"
+            exit 1
+          }
+          $files | ForEach-Object {
+            gh release upload "$env:RELEASE_TAG" $_ --clobber
+          }

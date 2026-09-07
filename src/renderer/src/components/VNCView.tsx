@@ -2,6 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
 import { VNCScaleMode } from '@shared/types'
 import { Tab } from '../App'
+import {
+  DEFAULT_KEY_MAPPINGS,
+  compileMappings,
+  eventModifiers,
+  keyboardEventToken,
+  modifierName,
+  modifierTokenName,
+  resolveShortcutToken,
+  sameMods
+} from '../keyMapping'
 
 interface Props {
   tab: Tab
@@ -76,6 +86,12 @@ export default function VNCView({ tab }: Props) {
     })
     rfbRef.current = rfb
 
+    // 侧键在部分平台会触发 auxclick（默认前进/后退），阻止 Electron 页面导航
+    const onAuxClick = (e: MouseEvent): void => {
+      if (e.button === 3 || e.button === 4) e.preventDefault()
+    }
+    screen.addEventListener('auxclick', onAuxClick, true)
+
     // 缩放方式
     const scaleMode: VNCScaleMode = cfg.scaleMode ?? (cfg.scaleView ? 'fit' : 'none')
 
@@ -101,6 +117,116 @@ export default function VNCView({ tab }: Props) {
       display.absX = (x: number) => origAbsX(x / scaleRef.x)
       display.absY = (y: number) => origAbsY(y / scaleRef.y)
     }
+
+    // ---------- 自定义按键 / 鼠标映射 ----------
+    // vnc.keyMappings 可配置任意条 { from, to }：按下 from（键盘键或鼠标键）
+    // 时改为发送 to 组合键。键盘监听挂在 screen 捕获阶段，先于 noVNC 画布
+    // 上的 keydown 执行；stopPropagation 阻止 noVNC 再发送原始按键。
+    const mappings = compileMappings(cfg.keyMappings ?? DEFAULT_KEY_MAPPINGS)
+    const suppressedCodes = new Set<string>()
+    // noVNC 已经发给远端的修饰键 → 实际 keysym（只统计画布获得焦点后收到
+    // 的 keydown，避免"先按住 Ctrl 再点画布"时误以为远端已按下 Ctrl）
+    const remoteMods = new Map<string, number>()
+    // 窗口失焦时收不到 keyup，清空状态避免下次按键被误吞/误判
+    const clearSuppressed = (): void => {
+      suppressedCodes.clear()
+      remoteMods.clear()
+    }
+    window.addEventListener('blur', clearSuppressed)
+
+    // 发送组合键。物理上已按住的修饰键不重复按下；源组合里多出来、
+    // 目标组合不需要的修饰键会临时释放，发完再恢复，避免目标被污染
+    // （如 ctrl+alt+k → ctrl+w，发送时不能把 alt 也带进去）。
+    const sendCombo = (
+      combo: { mods: number[]; key: number },
+      held: Map<string, number>
+    ): void => {
+      const targetNames = new Set<string>()
+      for (const k of combo.mods) {
+        const name = modifierName(k)
+        if (name) targetNames.add(name)
+      }
+      // 释放"物理按住但目标不需要"的修饰键
+      const released: number[] = []
+      for (const [name, keysym] of held) {
+        if (targetNames.has(name)) continue
+        rfb.sendKey(keysym, null, false)
+        released.push(keysym)
+      }
+      // 目标修饰键中尚未按住的才需要按下
+      const pressed: number[] = []
+      for (const k of combo.mods) {
+        const name = modifierName(k)
+        if (name && held.has(name)) continue
+        rfb.sendKey(k, null, true)
+        pressed.push(k)
+      }
+      rfb.sendKey(combo.key, null, true)
+      rfb.sendKey(combo.key, null, false)
+      for (let i = pressed.length - 1; i >= 0; i--)
+        rfb.sendKey(pressed[i], null, false)
+      // 恢复之前临时释放的修饰键（物理键仍处于按下状态）
+      for (const keysym of released) rfb.sendKey(keysym, null, true)
+    }
+
+    const onMappedKeyDown = (e: KeyboardEvent): void => {
+      const token = keyboardEventToken(e)
+      // 记录 noVNC 会发给远端的修饰键状态（保留实际 keysym，左右键区分）
+      const modKey = modifierTokenName(token)
+      if (modKey && token && !suppressedCodes.has(e.code)) {
+        const keysym = resolveShortcutToken(token)
+        if (keysym !== undefined) remoteMods.set(modKey, keysym)
+      }
+      if (suppressedCodes.has(e.code)) {
+        // 已映射按键的重复 keydown：一并吞掉，避免重复触发
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
+      if (!token) return
+      const key = resolveShortcutToken(token)
+      if (key === undefined) return
+      const mods = eventModifiers(e)
+      const hit = mappings.keys.find((m) => m.key === key && sameMods(m.mods, mods))
+      if (!hit) return
+      e.preventDefault()
+      e.stopPropagation()
+      // noVNC 的 sendKey 内部会判断连接状态与 viewOnly，这里无需也不能
+      // 依赖 rfb.connected（noVNC 1.7 并未暴露该属性）
+      rfb.focus() // stopPropagation 跳过了 noVNC 的 focusCanvas
+      sendCombo(hit.to, remoteMods)
+      suppressedCodes.add(e.code)
+    }
+    const onMappedKeyUp = (e: KeyboardEvent): void => {
+      const modKey = modifierTokenName(keyboardEventToken(e))
+      if (modKey) remoteMods.delete(modKey)
+      if (!suppressedCodes.delete(e.code)) return
+      // 源键的 keyup 也不再发给远端（远端只应看到映射后的按键）
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    // 鼠标映射：mouse_left / mouse_middle / mouse_right / mouse_back /
+    // mouse_forward（对应 MouseEvent.button 0/1/2/3/4）
+    const onMappedMouseDown = (e: MouseEvent): void => {
+      const to = mappings.mouse.get(e.button)
+      if (!to) return
+      // 阻止 Chromium/Electron 的页面前进/后退，也阻止 noVNC 发送原始鼠标键
+      e.preventDefault()
+      e.stopPropagation()
+      rfb.focus()
+      sendCombo(to, remoteMods)
+    }
+    const onMappedMouseUp = (e: MouseEvent): void => {
+      if (!mappings.mouse.has(e.button)) return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    screen.addEventListener('keydown', onMappedKeyDown, true)
+    screen.addEventListener('keyup', onMappedKeyUp, true)
+    screen.addEventListener('mousedown', onMappedMouseDown, true)
+    screen.addEventListener('mouseup', onMappedMouseUp, true)
 
     // 手动控制画面缩放（none/fit/fill，居中）。
     // 注意：novnc 内部会监听 canvas 父容器尺寸变化（ResizeObserver），
@@ -180,6 +306,9 @@ export default function VNCView({ tab }: Props) {
     }
     const onConnect = (): void => {
       connected = true
+      // 连接前按下的键不会发给远端，重置修饰键跟踪状态
+      remoteMods.clear()
+      suppressedCodes.clear()
       applyScale()
       showSize()
     }
@@ -268,6 +397,12 @@ export default function VNCView({ tab }: Props) {
       window.clearTimeout(timeout)
       window.clearInterval(clipTimer)
       window.clearInterval(pixelTimer)
+      screen.removeEventListener('auxclick', onAuxClick, true)
+      window.removeEventListener('blur', clearSuppressed)
+      screen.removeEventListener('keydown', onMappedKeyDown, true)
+      screen.removeEventListener('keyup', onMappedKeyUp, true)
+      screen.removeEventListener('mousedown', onMappedMouseDown, true)
+      screen.removeEventListener('mouseup', onMappedMouseUp, true)
       rfb.removeEventListener('connect', onConnect)
       rfb.removeEventListener('resize', onResize)
       rfb.removeEventListener('disconnect', onDisconnect)

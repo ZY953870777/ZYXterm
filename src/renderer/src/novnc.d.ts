@@ -29,11 +29,14 @@ declare module '@novnc/novnc' {
     /** 是否在本地缩放画面以适配容器（novnc 1.7+ 的属性名） */
     scaleViewport: boolean
     viewOnly: boolean
-    connected: boolean
     /** 向服务器发送剪贴板文本（客户端 → 服务器） */
     clipboardPasteFrom(text: string): void
     disconnect(): void
     sendCredentials(credentials: Record<string, string>): void
+    /** 发送按键（keysym 为 X11 keysym；down 省略时自动按下+抬起） */
+    sendKey(keysym: number, code: string | null, down?: boolean): void
+    /** 让 canvas 获取键盘焦点 */
+    focus(): void
     addEventListener(type: string, listener: (e: CustomEvent) => void): void
     removeEventListener(type: string, listener: (e: CustomEvent) => void): void
   }

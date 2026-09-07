@@ -19,7 +19,8 @@
 2. 编译 freerdp N-API addon（Electron ABI）
 3. 将 DLL + `freerdp.node` 放入 `resources/freerdp/`
 4. `npm ci --ignore-scripts`（serialport 用 N-API 预编译，无需重编译）
-5. `electron-builder --win --publish always`：打包 NSIS 安装包并上传 `latest.yml` + 安装包 + `.blockmap`
+5. `electron-builder --win --publish always`：打包 **NSIS 安装包 + 免安装 zip**，
+   并上传 `latest.yml` + 安装包 + `.blockmap` + `ZYXterm-<version>-x64.zip`
 
 **Linux（ubuntu-latest）**
 1. `apt` 安装系统 FreeRDP3 开发库（`libfreerdp-dev`）
@@ -56,9 +57,10 @@ bash build-docker.sh win
 > Windows 用的 FreeRDP dll + `freerdp.node` 来自 GitHub workflow
 > （`build-windows-freerdp.yml`）产物，需先放入 `resources/freerdp/`。
 
-产物在 `dist/`（或 `ZYXterm/`），自动更新需要：
+产物在 `dist/`（或 `ZYXterm/`）：
 
-- `ZYXterm-Setup-<version>.exe`
+- `ZYXterm-Setup-<version>.exe`：NSIS 安装包（自动更新用）
+- `ZYXterm-<version>-x64.zip`：免安装压缩包（解压即用，不参与自动更新）
 - `latest.yml`
 - `*.blockmap`
 
@@ -71,6 +73,7 @@ git push origin main
 # 用 GitHub CLI 上传为 Release
 gh release create v0.1.1 \
   dist/ZYXterm-Setup-0.1.1.exe \
+  dist/ZYXterm-0.1.1-x64.zip \
   dist/latest.yml \
   dist/ZYXterm-Setup-0.1.1.exe.blockmap \
   --title "ZYXterm v0.1.1" --notes "更新说明"

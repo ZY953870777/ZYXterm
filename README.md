@@ -149,11 +149,16 @@ sudo apt-get update && sudo apt-get install -y \
 
 - **GitHub Actions 自动编译发布**：推送 `v*` 标签或手动触发
   [`release.yml`](.github/workflows/release.yml)，自动编译 FreeRDP 3 + addon，
-  打包 Windows（NSIS）与 Linux（AppImage + deb）并上传到 GitHub Releases，
-  供 [`updater.ts`](src/main/updater.ts) 自动更新。详细流程见
+  打包 Windows（NSIS 安装包 + 免安装 zip）与 Linux（AppImage + deb）并上传到
+  GitHub Releases，供 [`updater.ts`](src/main/updater.ts) 自动更新。详细流程见
   [UPDATING.md](UPDATING.md)。
 - **Windows 本地打包**：完整步骤（VS Build Tools、镜像加速、打包命令、
   常见问题）见 [WINDOWS.md](WINDOWS.md)。
+- **Windows Server 2012 R2（Electron 22.3.27）**：随 Release 自动构建，产物
+  （安装包 + 免安装 zip，文件名含 `electron22.3.27-win2012r2`）追加到同一个
+  draft Release；也可手动运行
+  [`windows-electron22.3.27.yml`](.github/workflows/windows-electron22.3.27.yml)。
+  该包禁用自动更新。
 - **上传 GitHub**：仓库初始化与推送步骤见 [GITHUB.md](GITHUB.md)。
 
 ## 使用说明
@@ -167,8 +172,12 @@ sudo apt-get update && sudo apt-get install -y \
 - **SSH**：主机、端口、用户名，认证方式（密码 / 私钥，私钥可选口令）。
 - **串口**：设备路径（如 `/dev/ttyUSB0`、Windows 的 `COM3`）、波特率、
   数据位、停止位、校验位、流控。
-- **VNC**：主机、端口、密码（可选）、画质、自动缩放、只读模式。
+- **VNC**：主机、端口、密码（可选）、画质、自动缩放、只读模式、自定义按键
+  映射（任意键/鼠标键 → 任意组合键，可增删任意条，支持直接按键录制）。
 - **RDP**：主机、端口、用户名、密码、域、分辨率（默认跟随窗口容器）。
+
+> VNC 自定义按键映射（含鼠标侧键）与远端 Ubuntu（RealVNC + VS Code）排查
+> 说明见 [`docs/mouse-side-buttons.md`](docs/mouse-side-buttons.md)。
 
 ## 已知限制
 

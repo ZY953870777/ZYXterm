@@ -29,6 +29,22 @@
 >     worker 进程启动即生效 → **Windows 版 RDP 连接成功、画面正常显示**。
 >   - **最终方案**：utility process 隔离 + FreeRDP 3.30.0 + 默认安全层协商 +
 >     OpenSSL legacy provider（fork env 配置）。Windows/Linux 均验证通过。
+> - **「The specified module could not be found」根因（2026-10-15 定位并修复）**：
+>   不是 `freerdp.node` 缺失，而是 Windows 错误码 **126（ERROR_MOD_NOT_FOUND）
+>   = 依赖 DLL 找不到**。用 `objdump -p` 查 PE 导入表：
+>   `freerdp.node → KERNEL32/freerdp3.dll`；而 `freerdp3.dll`、`winpr3.dll`、
+>   `libcrypto-3-x64.dll`、`libssl-3-x64.dll`、`z.dll`、`libusb-1.0.dll`
+>   **全部动态链接 `VCRUNTIME140.dll`**——MSVC 运行库，**不属于 Windows 组件**，
+>   只在装了「VC++ 2015-2022 Redistributable (x64)」的机器上存在。
+>   用户机 `C:\Windows\System32\vcruntime140.dll` 缺失（仅 SysWOW64 有 32 位版）
+>   → 加载 addon 失败。反证：`@serialport/bindings-cpp` 的 win32-x64 预编译
+>   只引用系统 DLL（静态链接 CRT），故串口正常、仅 RDP 报错。
+>   注意：vcpkg 的 app-local 部署**只会复制依赖包 DLL，不含编译器运行库**，
+>   所以此前的「收集 build + vcpkg bin 的 *.dll」拿不到 `vcruntime140.dll`。
+>   - 修复：两个 Windows workflow 增加 “Bundle MSVC runtime (app-local)”，把
+>     `VCToolsRedistDir\x64\Microsoft.VC*.CRT\*.dll` 复制到 addon 同目录，并加
+>     打包前硬校验（缺 `vcruntime140.dll`/`freerdp3.dll`/`winpr3.dll`/`freerdp.node` 直接失败）。
+>   - `rdp-worker.cjs` 增强诊断：加载失败时打印目录清单 + 缺失项 + 可操作提示。
 > - **待办（Windows 侧）**：确认 ERRBASE_UNKNOWN 根因后修复；重跑 workflow 获得 3.30.0
 >   开发包（include+lib）后配置 `native/freerdp/third_party`，Windows 编译 addon 并验证打包。
 
@@ -136,6 +152,10 @@ flowchart LR
 - 鼠标：`freerdp_input_send_mouse_event(context, flags, x, y)`；
   flags 用 `PTR_FLAGS_MOVE / PTR_FLAGS_DOWN / PTR_FLAGS_BUTTON1/2/3` 组合，
   x/y 为 canvas 内像素坐标（FreeRDP 桌面坐标）。
+- 鼠标侧键（后退/前进）：RDP 基础鼠标事件只有三键，侧键必须走
+  `freerdp_input_send_extended_mouse_event(context, flags, x, y)`，
+  flags 用 `PTR_XFLAGS_DOWN | PTR_XFLAGS_BUTTON1/2`（浏览器 `MouseEvent.button`
+  3=后退、4=前进）；否则会被服务器当成左/右/中键点击。
 - 键盘：优先 `freerdp_input_send_keyboard_event_ex`（scancode，需前端维护
   DOM key → RDP scancode 映射表）；文本输入用 `freerdp_input_send_unicode_keyboard_event`。
 - renderer 捕获 canvas 的 `keydown/keyup/mousedown/mousemove/mouseup/wheel`，

@@ -4,7 +4,9 @@
 // Phase 2：帧链路——gdi primary_buffer 整帧对比检测脏区，节流投递到 JS 主线程。
 //   （FreeRDP 3 的 gdi->hdc->hwnd 为 NULL，无法用 hwnd->invalid，故用整帧像素
 //     对比找差异 bounding box，稳定可靠）
-// Phase 3：键盘/鼠标输入注入（sendMouse / sendKey / sendUnicode）。
+// Phase 3：键盘/鼠标输入注入（sendMouse / sendExtendedMouse / sendKey /
+//   sendUnicode）。sendExtendedMouse 用 PTR_XFLAGS_* 发送侧键（后退/前进），
+//   基础 sendMouse 只支持左/中/右三键。
 //
 // 实现：FreeRDP 底层 API（freerdp_new + freerdp_context_new_ex + freerdp_connect）
 // 在工作线程运行；事件经 N-API ThreadSafeFunction 投递到 JS 主线程。
@@ -13,6 +15,7 @@
 //   const session = new addon.RdpSession(cfg, handler)
 //   session.connect()
 //   session.sendMouse(x, y, flags)
+//   session.sendExtendedMouse(x, y, flags)  // PTR_XFLAGS_*：侧键后退/前进
 //   session.sendKey(scancode, pressed)
 //   session.sendUnicode(codePoint, pressed)
 //   session.disconnect()
@@ -525,6 +528,7 @@ class RdpSession : public Napi::ObjectWrap<RdpSession> {
             InstanceMethod("connect", &RdpSession::Connect),
             InstanceMethod("disconnect", &RdpSession::Disconnect),
             InstanceMethod("sendMouse", &RdpSession::SendMouse),
+            InstanceMethod("sendExtendedMouse", &RdpSession::SendExtendedMouse),
             InstanceMethod("sendKey", &RdpSession::SendKey),
             InstanceMethod("sendUnicode", &RdpSession::SendUnicode),
         });
@@ -573,6 +577,22 @@ class RdpSession : public Napi::ObjectWrap<RdpSession> {
     rdpInput* input = Input();
     if (input) {
       freerdp_input_send_mouse_event(input, (UINT16)flags, (UINT16)x, (UINT16)y);
+    }
+    return env.Undefined();
+  }
+
+  // 扩展鼠标按键（侧键：后退/前进）。RDP 基础鼠标事件只有左/中/右三键，
+  // 侧键必须走 PTR_XFLAGS_* 的 extended mouse event，否则会被当成左/右/中键。
+  Napi::Value SendExtendedMouse(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 3) return env.Undefined();
+    uint32_t x = info[0].As<Napi::Number>().Uint32Value();
+    uint32_t y = info[1].As<Napi::Number>().Uint32Value();
+    uint32_t flags = info[2].As<Napi::Number>().Uint32Value();
+    rdpInput* input = Input();
+    if (input) {
+      freerdp_input_send_extended_mouse_event(input, (UINT16)flags, (UINT16)x,
+                                              (UINT16)y);
     }
     return env.Undefined();
   }

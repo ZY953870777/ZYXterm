@@ -1,5 +1,5 @@
 import { app, BrowserWindow } from 'electron'
-import { autoUpdater, UpdateInfo } from 'electron-updater'
+import type { UpdateInfo } from 'electron-updater'
 import { UpdaterState } from '@shared/types'
 
 /**
@@ -17,6 +17,28 @@ let initialized = false
 /** 当前更新状态：用于避免"已下载/下载中"时重复检查 */
 let currentState: UpdaterState = { state: 'idle' }
 
+/** Electron 主版本 */
+const ELECTRON_MAJOR = Number(process.versions.electron?.split('.')[0] ?? 0)
+/**
+ * Electron 22（Windows Server 2012 R2 legacy 包）无法运行现代 Electron 43
+ * 的安装包，因此老版本 Electron 完全禁用自动更新，避免升级后直接启动失败。
+ */
+const UPDATES_SUPPORTED = ELECTRON_MAJOR >= 28
+
+/**
+ * 懒加载 electron-updater：legacy（Electron 22）构建不加载该模块，
+ * 避免其使用新版本 Electron 才有的 API 导致主进程启动异常。
+ */
+let updaterInstance: typeof import('electron-updater').autoUpdater | null = null
+function getUpdater(): typeof import('electron-updater').autoUpdater {
+  if (!updaterInstance) {
+    updaterInstance = (
+      require('electron-updater') as typeof import('electron-updater')
+    ).autoUpdater
+  }
+  return updaterInstance
+}
+
 function broadcast(payload: UpdaterState): void {
   currentState = payload
   for (const win of BrowserWindow.getAllWindows()) {
@@ -26,8 +48,9 @@ function broadcast(payload: UpdaterState): void {
 
 /** 安全检查更新：已下载/下载中不重复检查 */
 function safeCheck(): void {
+  if (!UPDATES_SUPPORTED) return
   if (currentState.state === 'downloaded' || currentState.state === 'downloading') return
-  void autoUpdater.checkForUpdates().catch(() => {
+  void getUpdater().checkForUpdates().catch(() => {
     /* 失败由 error 事件上报 */
   })
 }
@@ -43,9 +66,10 @@ function releaseNotesText(info: UpdateInfo): string | undefined {
 
 /** 初始化自动更新（主进程启动时调用一次） */
 export function initUpdater(): void {
-  if (initialized || !app.isPackaged) return
+  if (initialized || !app.isPackaged || !UPDATES_SUPPORTED) return
   initialized = true
 
+  const autoUpdater = getUpdater()
   // 先提示再下载，避免自动下载大安装包
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
@@ -79,18 +103,18 @@ export function initUpdater(): void {
 
 /** 手动检查更新 */
 export function checkForUpdates(): void {
-  if (!app.isPackaged) return
+  if (!app.isPackaged || !UPDATES_SUPPORTED) return
   safeCheck()
 }
 
 /** 下载更新 */
 export function downloadUpdate(): void {
-  if (!app.isPackaged) return
-  void autoUpdater.downloadUpdate().catch(() => {})
+  if (!app.isPackaged || !UPDATES_SUPPORTED) return
+  void getUpdater().downloadUpdate().catch(() => {})
 }
 
 /** 退出并安装（用户确认后） */
 export function quitAndInstall(): void {
-  if (!app.isPackaged) return
-  autoUpdater.quitAndInstall()
+  if (!app.isPackaged || !UPDATES_SUPPORTED) return
+  getUpdater().quitAndInstall()
 }

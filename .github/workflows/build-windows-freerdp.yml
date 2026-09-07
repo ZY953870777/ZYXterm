@@ -411,6 +411,64 @@ jobs:
 
 
       # ============================================================
+      # 10d. Bundle MSVC runtime (app-local)
+      #      freerdp3.dll / winpr3.dll / libcrypto-3-x64.dll / z.dll / libusb-1.0.dll
+      #      均由 MSVC 编译并动态链接 VCRUNTIME140.dll（非 Windows 自带组件）。
+      #      用户机未装 x64 VC++ 运行库时加载 freerdp.node 会报 126
+      #      (ERROR_MOD_NOT_FOUND)：“The specified module could not be found.”
+      #      把 MSVC CRT 随包到 addon 同目录，使下载本 artifact 的手动流程也开箱可用。
+      # ============================================================
+
+      - name: Bundle MSVC runtime (app-local)
+        shell: pwsh
+        run: |
+          $pkg = "package/freerdp"
+          $roots = @()
+          if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
+          foreach ($vs in @("Enterprise", "Professional", "Community", "BuildTools")) {
+            $roots += "C:\Program Files\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+            $roots += "C:\Program Files (x86)\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+          }
+          $crt = $null
+          foreach ($r in $roots) {
+            if (-not $r -or -not (Test-Path $r)) { continue }
+            $hit = Get-ChildItem $r -Recurse -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'onecore' } |
+                   Select-Object -First 1
+            if ($hit) { $crt = $hit; break }
+          }
+          if (-not $crt) {
+            Write-Error "未找到 x64 MSVC CRT 目录（Microsoft.VC*.CRT），无法随包 vcruntime140.dll"
+            exit 1
+          }
+          Write-Host "MSVC CRT: $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" $pkg -Force
+          Get-ChildItem $pkg -Filter *.dll |
+            Where-Object { $_.Name -match '^(vcruntime|msvcp|concrt)' } |
+            Select-Object Name, Length | Format-Table -AutoSize
+
+
+      # ============================================================
+      # 10e. Verify package completeness
+      # ============================================================
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $pkg = "package/freerdp"
+          $required = @("freerdp.node", "freerdp3.dll", "winpr3.dll", "vcruntime140.dll")
+          $missing = @()
+          foreach ($n in $required) {
+            if (-not (Test-Path (Join-Path $pkg $n))) { $missing += $n }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "package/freerdp 缺少必需文件: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "OK FreeRDP package complete"
+
+
+      # ============================================================
       # 11. Upload artifact
       # ============================================================
 
