@@ -97,6 +97,46 @@ jobs:
             }
           }
 
+      # ---------- 随包 MSVC 运行库（app-local，必需）----------
+      # FreeRDP 3 的 freerdp3.dll / winpr3.dll / libcrypto-3-x64.dll / libssl-3-x64.dll
+      # / z.dll / libusb-1.0.dll 均由 MSVC 编译并**动态链接 VCRUNTIME140.dll**
+      # （可用 `objdump -p <dll> | grep "DLL Name"` 查导入表确认）。vcruntime140.dll
+      # **不是 Windows 自带组件**，只有装了「Microsoft Visual C++ 2015-2022
+      # Redistributable (x64)」的机器才有。用户机缺它时加载 addon 会失败并报：
+      #     FreeRDP 原生模块加载失败：The specified module could not be found.
+      #     \\?\C:\...\resources\freerdp\freerdp.node
+      # 该错误码是 Windows 的 126（ERROR_MOD_NOT_FOUND）= **依赖 DLL 找不到**，
+      # 而非 .node 文件本身缺失，所以表现为「文件明明存在却加载失败」。
+      # 把 MSVC CRT 复制到 resources/freerdp（与 addon 同目录；加载器解析依赖时
+      # 优先搜索该目录，属微软允许的 app-local 部署），使安装包自包含。
+      - name: Bundle MSVC runtime (app-local)
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          $roots = @()
+          if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
+          foreach ($vs in @("Enterprise", "Professional", "Community", "BuildTools")) {
+            $roots += "C:\Program Files\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+            $roots += "C:\Program Files (x86)\Microsoft Visual Studio\2022\$vs\VC\Redist\MSVC"
+          }
+          $crt = $null
+          foreach ($r in $roots) {
+            if (-not $r -or -not (Test-Path $r)) { continue }
+            $hit = Get-ChildItem $r -Recurse -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match '\\x64\\' -and $_.FullName -notmatch 'onecore' } |
+                   Select-Object -First 1
+            if ($hit) { $crt = $hit; break }
+          }
+          if (-not $crt) {
+            Write-Error "未找到 x64 MSVC CRT 目录（Microsoft.VC*.CRT），无法随包 vcruntime140.dll"
+            exit 1
+          }
+          Write-Host "MSVC CRT: $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" $pkg -Force
+          Get-ChildItem $pkg -Filter *.dll |
+            Where-Object { $_.Name -match '^(vcruntime|msvcp|concrt)' } |
+            Select-Object Name, Length | Format-Table -AutoSize
+
       # ---------- 打包开发头文件 + import lib（供 addon 编译）----------
       - name: Package dev headers + libs
         shell: pwsh
@@ -133,6 +173,26 @@ jobs:
           npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=x64 --dist-url=https://electronjs.org/headers
           Copy-Item "native/freerdp/build/Release/freerdp.node" "resources/freerdp/freerdp.node" -Force
 
+      # ---------- 打包前硬校验：RDP 运行库齐全 ----------
+      # 缺 freerdp3.dll/winpr3.dll 或缺 MSVC 运行库 vcruntime140.dll，用户机加载
+      # addon 都会报 126（The specified module could not be found）。这里直接失败，
+      # 避免产出「RDP 不可用」的安装包却无人察觉。
+      - name: Verify FreeRDP runtime package
+        shell: pwsh
+        run: |
+          $pkg = "resources/freerdp"
+          $required = @("freerdp.node", "freerdp3.dll", "winpr3.dll", "vcruntime140.dll")
+          $missing = @()
+          foreach ($n in $required) {
+            if (-not (Test-Path (Join-Path $pkg $n))) { $missing += $n }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "resources/freerdp 缺少必需文件: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "OK FreeRDP runtime complete"
+          Get-ChildItem $pkg | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize
+
       # ---------- 安装依赖 + 构建 + 打包发布 ----------
       - name: Install project deps
         # serialport 用 N-API 预编译（跨 ABI），无需 node-gyp 重编译
@@ -154,8 +214,10 @@ jobs:
           path: dist/*.exe
 
   # ============================================================
-  # Linux x64：apt 装系统 freerdp3 开发库，node-gyp 编 addon，
-  # 随包分发 libfreerdp3/libwinpr3 .so（rpath=$ORIGIN 加载）
+  # Linux x64：在 glibc 2.35 基线容器（Ubuntu 22.04）内编译 FreeRDP3 addon +
+  # 收集运行库到 build/freerdp-linux/（随包，rpath=$ORIGIN），宿主 electron-builder
+  # 打包。目的：产物兼容 Ubuntu 22.04+（glibc≥2.35）。切勿在 ubuntu-latest
+  # (24.04, glibc2.39) 上编随包库——那样会要求 GLIBC_2.38，在较旧发行版无法加载。
   # ============================================================
   release-linux:
     runs-on: ubuntu-latest
@@ -166,62 +228,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install FreeRDP3 dev + build tools
-        run: |
-          sudo apt-get update
-          # Ubuntu 24.04+ 的 FreeRDP3 开发包名为 freerdp3-dev（fallback 兼容）；
-          # patchelf 用于给 freerdp 运行库设置 rpath（随包加载依赖）
-          sudo apt-get install -y freerdp3-dev patchelf \
-            || sudo apt-get install -y libfreerdp3-dev patchelf \
-            || sudo apt-get install -y libfreerdp-dev patchelf
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Compile freerdp addon (Linux)
-        shell: bash
+      # 缓存 FreeRDP3 源编译结果（glibc 2.35 基线），跨 run 复用避免每次重编
+      - name: Cache FreeRDP3 source build
+        uses: actions/cache@v4
+        with:
+          path: docker-cache/freerdp3
+          key: freerdp3-src-linux-glibc235
+
+      # 编译 addon + 收集 libfreerdp3/libwinpr3/全部依赖 到 build/freerdp-linux/
+      # （package.json 的 linux extraResources 打包时合并为包内
+      #   resources/freerdp/build/Release，不触碰 resources/freerdp/）
+      # 在 ubuntu:22.04 容器内以 root 运行 prepare（容器无 freerdp3-dev →
+      # prepare 自动 apt 装依赖并源编译 FreeRDP 3.30，产物 glibc 2.35）
+      - name: Prepare FreeRDP Linux resources (glibc-2.35 基线)
         run: |
-          npm install --no-save --ignore-scripts node-addon-api node-gyp
-          # npm ci 在后续步骤才执行，此处 node_modules/electron 尚不存在，从 package.json 读版本。
-          # 注意：bash 赋值不能带 $ 前缀（$ev= 会把 =... 当命令执行）
-          ev=$(node -e "console.log(require('./package.json').devDependencies.electron.replace(/[\^~]/,''))")
-          npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=x64 --dist-url=https://electronjs.org/headers
-          mkdir -p resources/freerdp/build/Release
-          cp -f native/freerdp/build/Release/freerdp.node resources/freerdp/build/Release/
-          # 复制 FreeRDP 运行库到 addon 同目录（rpath=$ORIGIN 加载）
-          for lib in libfreerdp3.so.3 libwinpr3.so.3; do
-            src=$(find /usr/lib -name "$lib*" -type f 2>/dev/null | head -1)
-            if [ -n "$src" ]; then
-              cp -f "$src" "resources/freerdp/build/Release/$lib"
-              echo "  ✓ 已准备 $lib"
-            fi
-          done
-          # 用 ldd 收集 addon 与 freerdp 运行库的全部动态依赖（如 ICU 等）随包分发，
-          # 避免目标机因版本不同报 "libicuuc.so.74: cannot open shared object file"
-          collect_deps() {
-            ldd "$1" 2>/dev/null | grep '=>' | awk '{print $3}' | while read -r so; do
-              case "$so" in /*) ;; *) continue ;; esac
-              base=$(basename "$so")
-              # 跳过目标系统必有的 glibc 基础库
-              case "$base" in
-                libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libgcc_s.so*|libstdc++.so*|ld-linux*) continue ;;
-              esac
-              if [ ! -f "resources/freerdp/build/Release/$base" ]; then
-                cp -f "$so" "resources/freerdp/build/Release/$base" 2>/dev/null || true
-                echo "  ✓ 随包依赖: $base"
-              fi
-            done
-          }
-          collect_deps "resources/freerdp/build/Release/freerdp.node"
-          collect_deps "resources/freerdp/build/Release/libfreerdp3.so.3"
-          collect_deps "resources/freerdp/build/Release/libwinpr3.so.3"
-          # 给 freerdp 运行库设 rpath=$ORIGIN（--force-rpath=DT_RPATH，找不到再回退系统路径），
-          # 使其依赖（ICU 等）从自身目录加载；不设全局 LD_LIBRARY_PATH，避免影响 Electron utility 进程
-          patchelf --set-rpath '$ORIGIN' --force-rpath resources/freerdp/build/Release/libfreerdp3.so.3
-          patchelf --set-rpath '$ORIGIN' --force-rpath resources/freerdp/build/Release/libwinpr3.so.3
-          echo "  ✓ 已为 freerdp 运行库设置 rpath=\$ORIGIN"
+          docker run --rm \
+            -v "$PWD:/project" -w /project \
+            -e FREERDP_CACHE=/project/docker-cache/freerdp3 \
+            ubuntu:22.04 \
+            bash -c '
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq curl ca-certificates build-essential python3 make git pkg-config file patchelf zlib1g-dev libssl-dev liburiparser-dev libkrb5-dev libicu-dev libusb-1.0-0-dev >/dev/null
+              (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true)
+              apt-get install -y -qq nodejs >/dev/null 2>&1 || true
+              echo "container node: $(node -v 2>/dev/null || echo MISSING)"
+              bash scripts/prepare-freerdp-linux.sh
+            '
+
+      # 容器以 root 产出（build/freerdp-linux、native/freerdp、node_modules 里
+      # 装了 node-addon-api/node-gyp 等），全部改回 runner 属主，否则宿主 npm ci
+      # 清理 node_modules 会 EACCES
+      - name: Fix ownership of container outputs
+        run: |
+          sudo chown -R "$USER" build/freerdp-linux native/freerdp node_modules 2>/dev/null || true
+          sudo chown -R "$USER" docker-cache 2>/dev/null || true
 
       - name: Install project deps
         run: npm ci --ignore-scripts
@@ -307,16 +354,21 @@ jobs:
           npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=arm64 --dist-url=https://electronjs.org/headers
           cp -f native/freerdp/build/Release/freerdp.node "$D/"
 
-          # 递归收集非系统 dylib 依赖到 addon 同目录（freerdp3/winpr3/openssl…）
+          # 递归收集非系统 dylib 依赖到 addon 同目录（freerdp3/winpr3/openssl…）；
+          # macOS 动态库常以 @rpath/ 引用依赖，需按 brew lib 目录解析后随包
           collect() {
             local lib="$1"
             otool -L "$lib" 2>/dev/null | awk '/^\t/{print $1}' | while read -r dep; do
               case "$dep" in
-                @loader_path/*|@rpath/*|/usr/lib/*|/System/*) continue ;;
+                @loader_path/*|/usr/lib/*|/System/*) continue ;;
               esac
               local base; base=$(basename "$dep")
-              if [ -f "$dep" ] && [ ! -f "$D/$base" ]; then
-                cp -f "$dep" "$D/$base" 2>/dev/null || true
+              local src="$dep"
+              case "$dep" in
+                @rpath/*) src="$FP/lib/$base" ;;
+              esac
+              if [ -f "$src" ] && [ ! -f "$D/$base" ]; then
+                cp -f "$src" "$D/$base" 2>/dev/null || true
                 collect "$D/$base"
               fi
             done

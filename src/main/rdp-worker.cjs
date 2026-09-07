@@ -83,6 +83,48 @@ function ensureDlls(addonPath) {
   }
 }
 
+// Windows 加载 .node 报 "The specified module could not be found" 时，错误码是
+// 126（ERROR_MOD_NOT_FOUND），含义是**依赖的 DLL 找不到**，而不是 .node 文件本身
+// 缺失——所以才会出现「文件明明存在却加载失败」。这里探测同目录是否缺关键 DLL，
+// 并给出可操作提示。最常见元凶是 MSVC 运行库 VCRUNTIME140.dll：FreeRDP 的
+// freerdp3.dll/winpr3.dll/libcrypto-3-x64.dll/z.dll 等均由 MSVC 编译且动态链接它，
+// 而 vcruntime140.dll 不是 Windows 自带组件（来自 VC++ 2015-2022 Redistributable）。
+function diagnoseLoadFailure(addonPath) {
+  if (process.platform !== 'win32') return ''
+  const dir = path.dirname(addonPath)
+  let files = []
+  try {
+    files = fs.readdirSync(dir).map((f) => f.toLowerCase())
+  } catch {
+    /* ignore */
+  }
+  const required = ['freerdp3.dll', 'winpr3.dll', 'vcruntime140.dll']
+  const missing = required.filter((n) => !files.includes(n))
+  const parts = []
+  if (missing.length) parts.push('同目录缺少文件: ' + missing.join('、'))
+  if (missing.includes('vcruntime140.dll')) {
+    parts.push(
+      '请安装「Microsoft Visual C++ 2015-2022 Redistributable (x64)」，' +
+        '或把 vcruntime140.dll 复制到 ' + dir
+    )
+  }
+  if (!missing.length) {
+    parts.push(
+      '同目录关键 DLL 齐全，可能是某个间接依赖 DLL 缺失；' +
+        '可在 Windows 用 Dependencies.exe 打开 ' + addonPath + ' 查看完整依赖'
+    )
+  }
+  return parts.length ? '；' + parts.join('；') : ''
+}
+
+function listDir(dir) {
+  try {
+    return fs.readdirSync(dir).join(', ')
+  } catch {
+    return '(无法读取)'
+  }
+}
+
 function send(type, payload) {
   try {
     process.parentPort.postMessage({ type, payload })
@@ -116,9 +158,9 @@ function start(config) {
   // OPENSSL_MODULES 仅 Windows 需要（随包 legacy.dll）；Linux 用系统默认
   // ossl-modules 目录（legacy.so 在系统路径），设错会致 legacy 加载失败 → NLA 失败
   try {
+    const modulesDir = path.dirname(addonPath)
     if (process.platform === 'win32' || process.platform === 'darwin') {
       // Windows: 随包 legacy.dll；macOS: 随包 ossl-modules/*.dylib
-      const modulesDir = path.dirname(addonPath)
       process.env.OPENSSL_MODULES = modulesDir
     }
     const confPath = path.join(os.tmpdir(), 'zyxterm-openssl.cnf')
@@ -151,8 +193,16 @@ function start(config) {
   try {
     addon = require(addonPath)
   } catch (e) {
+    const dir = path.dirname(addonPath)
     log('addon load error: ' + (e && e.stack ? e.stack : e))
-    send('error', 'FreeRDP 原生模块加载失败: ' + (e && e.message ? e.message : e))
+    // 记录同目录完整文件清单：便于在无法远程操作时定位「依赖 DLL 缺失」
+    log('addon dir (' + dir + '): ' + listDir(dir))
+    send(
+      'error',
+      'FreeRDP 原生模块加载失败: ' +
+        (e && e.message ? e.message : e) +
+        diagnoseLoadFailure(addonPath)
+    )
     return
   }
   log('addon loaded')

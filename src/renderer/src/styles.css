@@ -570,6 +570,34 @@ button {
   margin-top: 4px;
 }
 
+/* 首页头部右侧：配置导出/导入按钮 */
+.grid-header {
+  position: relative;
+}
+
+.grid-tools {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  gap: 8px;
+}
+
+.grid-tool-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.grid-tool-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .grid-cols {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -740,7 +768,7 @@ button {
 /* ============ 标签悬停状态 tooltip ============ */
 .tab-tooltip {
   position: fixed;
-  transform: translate(-50%, -100%);
+  transform: translate(-50%, 0);
   z-index: 170;
   pointer-events: none;
   background: var(--bg-panel);
@@ -1920,6 +1948,22 @@ button {
   color: var(--text);
   line-height: 1.6;
   word-break: break-word;
+}
+/* 输入型弹窗（uiPrompt：加密口令等） */
+.prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: -6px 0 16px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+}
+.prompt-input:focus {
+  border-color: var(--accent);
 }
 .confirm-actions {
   display: flex;

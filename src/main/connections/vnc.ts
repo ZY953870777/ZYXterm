@@ -20,6 +20,8 @@ export class VNCSession implements BaseSession {
 
   private wss: WebSocketServer | null = null
   private sockets = new Set<net.Socket>()
+  /** 是否已成功连上过远端 VNC 服务器（只报一次 connected） */
+  private everConnected = false
   private readonly send: SendFn
 
   constructor(sessionId: string, profile: ConnectionProfile, send: SendFn) {
@@ -47,7 +49,8 @@ export class VNCSession implements BaseSession {
         wss.on('listening', () => {
           const addr = wss.address() as net.AddressInfo
           this.wsEndpoint = `ws://127.0.0.1:${addr.port}/websockify`
-          this.setStatus('connected')
+          // 本地代理就绪只是中转站启动，尚未触碰远端 VNC 服务器，
+          // 保持 connecting，等 handleConnection 里 TCP 真正连上才报 connected
           resolve()
         })
 
@@ -77,7 +80,11 @@ export class VNCSession implements BaseSession {
     }
 
     tcp.on('connect', () => {
-      // TCP 就绪后即可透传
+      // TCP 就绪后即可透传；首次连上远端 VNC 服务器才算真正连接成功
+      if (!this.everConnected) {
+        this.everConnected = true
+        this.setStatus('connected')
+      }
     })
 
     tcp.on('data', (data: Buffer) => {

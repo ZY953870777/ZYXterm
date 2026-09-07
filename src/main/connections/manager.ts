@@ -38,12 +38,33 @@ export class ConnectionManager {
     sleepResolve: ((ok: boolean) => void) | null
   } | null = null
 
+  /** 终端输出缓冲（冷启动首连时渲染进程挂载慢于 SSH 握手，最早输出会丢，
+   *  保留最近 256KB 供终端视图挂载后回放）；seq 为递增序号，用于回放去重 */
+  private termLog = new Map<string, string>()
+  private termSeq = new Map<string, number>()
+
   /** 多窗口：会话状态/终端数据广播到所有窗口，由各窗口按 sessionId 自行过滤 */
   private send: SendFn = (channel, ...args) => {
+    if (channel === 'terminal:data') {
+      const [sessionId, data] = args as [string, string]
+      const seq = (this.termSeq.get(sessionId) ?? 0) + 1
+      this.termSeq.set(sessionId, seq)
+      const log = this.termLog.get(sessionId) ?? ''
+      this.termLog.set(sessionId, (log + data).slice(-262144))
+      args = [sessionId, data, seq]
+    }
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         win.webContents.send(channel, ...args)
       }
+    }
+  }
+
+  /** 终端视图挂载后回放积压输出：返回缓冲内容及最新序号（> seq 的实时事件才需要写入） */
+  terminalSync(sessionId: string): { seq: number; data: string } {
+    return {
+      seq: this.termSeq.get(sessionId) ?? 0,
+      data: this.termLog.get(sessionId) ?? ''
     }
   }
 
@@ -90,6 +111,8 @@ export class ConnectionManager {
       await session.dispose()
       this.sessions.delete(sessionId)
     }
+    this.termLog.delete(sessionId)
+    this.termSeq.delete(sessionId)
   }
 
   get(sessionId: string): BaseSession | undefined {

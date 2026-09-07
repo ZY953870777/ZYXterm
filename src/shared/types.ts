@@ -69,6 +69,11 @@ export interface RDPProfile {
   /** password 是否已加密存储 */
   passwordEnc?: boolean
   domain: string
+  /**
+   * 防止远端锁定（屏幕常亮）：开启后空闲超过 2 分钟时自动向远端注入一次
+   * 无害按键（左 Ctrl 按下+抬起），重置远端空闲计时器，避免息屏/锁屏。
+   */
+  keepAwake?: boolean
 }
 
 /** 持久化的连接配置 */
@@ -85,6 +90,39 @@ export interface ConnectionProfile {
 
 /** 新建/编辑配置时的输入（id 与 createdAt 由主进程生成） */
 export type NewProfileInput = Omit<ConnectionProfile, 'id' | 'createdAt'>
+
+/** 配置导出/导入的明文结构（导出前内存中组装；写入文件前整体加密） */
+export interface ConfigBackup {
+  /** 固定为 'zyxterm'，导入时校验 */
+  app: 'zyxterm'
+  /** 备份格式版本（结构不兼容时递增） */
+  format: 1
+  exportedAt: string
+  /** 连接配置（含顺序：数组顺序即首页同类内的排列顺序；密码为明文） */
+  profiles: ConnectionProfile[]
+  /** 渲染层持久化偏好（localStorage 键 → 解析后的值）：
+   *  类别列顺序、串口/联动自动化脚本、快捷命令分组等 */
+  preferences: Record<string, unknown>
+}
+
+/** 配置导出文件（磁盘上的结构）：整个备份用口令（scrypt 派生密钥）+
+ *  AES-256-GCM 加密，口令不随文件保存，跨机器导入时凭口令解密。 */
+export interface ConfigBackupFile {
+  app: 'zyxterm'
+  format: 2
+  cipher: 'aes-256-gcm'
+  kdf: 'scrypt'
+  /** scrypt 盐（base64） */
+  salt: string
+  /** 初始化向量（base64） */
+  iv: string
+  /** 认证标签（base64）：口令错误时解密在此失败 */
+  tag: string
+  /** 密文（ConfigBackup 序列化后加密，base64） */
+  data: string
+  /** 明文元信息（导入前展示用，不含敏感内容） */
+  meta: { exportedAt: string; profileCount: number }
+}
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 

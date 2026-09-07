@@ -1,6 +1,6 @@
 {
   "name": "zyxterm",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "基于 Electron + React + TypeScript 的桌面终端：支持 SSH / 串口 / VNC / RDP 协议",
   "main": "./out/main/index.js",
   "author": "ZhaoYang <953870777@qq.com>",
@@ -35,13 +35,6 @@
     "npmRebuild": false,
     "extraResources": [
       {
-        "from": "resources/freerdp",
-        "to": "freerdp",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
         "from": "src/main/rdp-worker.cjs",
         "to": "rdp-worker.cjs"
       }
@@ -51,7 +44,16 @@
         "AppImage",
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "extraResources": [
+        {
+          "from": "build/freerdp-linux",
+          "to": "freerdp/build/Release",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "win": {
       "target": [
@@ -62,7 +64,16 @@
           ]
         }
       ],
-      "artifactName": "ZYXterm-Setup-${version}.${ext}"
+      "artifactName": "ZYXterm-Setup-${version}.${ext}",
+      "extraResources": [
+        {
+          "from": "resources/freerdp",
+          "to": "freerdp",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -74,6 +85,15 @@
     "mac": {
       "target": [
         "dmg"
+      ],
+      "extraResources": [
+        {
+          "from": "resources/freerdp/build/Release",
+          "to": "freerdp/build/Release",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "publish": [

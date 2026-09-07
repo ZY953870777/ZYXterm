@@ -15,6 +15,13 @@ interface RdpInputMsg {
   pressed?: boolean
 }
 
+/** keepAwake：判定"空闲"的阈值（2 分钟无输入） */
+const KEEP_AWAKE_IDLE_MS = 2 * 60 * 1000
+/** keepAwake：检查周期 */
+const KEEP_AWAKE_CHECK_MS = 30 * 1000
+/** keepAwake：注入的按键扫描码 —— 左 Ctrl（0x1D），按下即抬起，无副作用 */
+const KEEP_AWAKE_SCANCODE = 0x1d
+
 /** utility process worker 脚本路径（打包用 extraResources，开发用源码目录） */
 function workerScriptPath(): string {
   const packed = path.join(process.resourcesPath, 'rdp-worker.cjs')
@@ -59,6 +66,10 @@ export class RDPSession2 implements BaseSession {
   private readonly send: SendFn
   /** 当前会话分辨率（由渲染进程容器尺寸驱动，重连时应用） */
   private size: { width: number; height: number } = { width: 1280, height: 720 }
+  /** keepAwake：最近一次用户输入时间（Date.now()） */
+  private lastInputAt = Date.now()
+  /** keepAwake：空闲检查定时器 */
+  private keepAwakeTimer: NodeJS.Timeout | null = null
 
   constructor(sessionId: string, profile: ConnectionProfile, send: SendFn) {
     this.sessionId = sessionId
@@ -220,14 +231,17 @@ export class RDPSession2 implements BaseSession {
         height
       }
     })
+    if (cfg.keepAwake) this.startKeepAwake()
   }
 
   sendInput(input: RdpInputMsg): void {
+    this.lastInputAt = Date.now()
     this.child?.postMessage({ cmd: 'input', input })
   }
 
   async dispose(): Promise<void> {
     this.disposed = true
+    this.stopKeepAwake()
     this.setStatus('disconnected')
     try {
       this.child?.kill()
@@ -235,6 +249,36 @@ export class RDPSession2 implements BaseSession {
       /* ignore */
     }
     this.child = null
+  }
+
+  /** keepAwake：开启防锁定 —— 周期检查空闲，超阈值注入一次左 Ctrl 按下/抬起
+   *  重置远端空闲计时（远端组策略"闲置限制"仅统计输入事件，不含画面更新） */
+  private startKeepAwake(): void {
+    if (this.keepAwakeTimer) return
+    this.lastInputAt = Date.now()
+    this.keepAwakeTimer = setInterval(() => {
+      if (this.disposed || this.status !== 'connected' || !this.child) return
+      if (Date.now() - this.lastInputAt < KEEP_AWAKE_IDLE_MS) return
+      // 注入左 Ctrl 按下 → 100ms 后抬起（成对，避免修饰键卡住影响用户后续输入）
+      this.child.postMessage({
+        cmd: 'input',
+        input: { type: 'key', scancode: KEEP_AWAKE_SCANCODE, pressed: true }
+      })
+      setTimeout(() => {
+        this.child?.postMessage({
+          cmd: 'input',
+          input: { type: 'key', scancode: KEEP_AWAKE_SCANCODE, pressed: false }
+        })
+      }, 100)
+      this.lastInputAt = Date.now() // 注入本身也算活动，避免连续触发
+    }, KEEP_AWAKE_CHECK_MS)
+  }
+
+  private stopKeepAwake(): void {
+    if (this.keepAwakeTimer) {
+      clearInterval(this.keepAwakeTimer)
+      this.keepAwakeTimer = null
+    }
   }
 
   private onWorkerMessage(e: unknown): void {

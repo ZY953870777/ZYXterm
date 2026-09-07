@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { uiAlert, uiConfirm } from './dialogs'
+import { uiAlert, uiConfirm, uiPrompt } from './dialogs'
 import { parseGlobalMacro } from './globalMacroParser'
 import GlobalMacroDialog from './components/GlobalMacroDialog'
 import GlobalMacroProgress from './components/GlobalMacroProgress'
 import type {
+  ConfigBackup,
   GlobalMacroScript,
   GlobalMacroStatus,
   GlobalMacroTarget
@@ -36,6 +37,17 @@ export interface Tab {
   profile: ConnectionProfile
 }
 
+/** 参与导出/导入的渲染层持久化键（localStorage）。
+ *  路径记忆类键（日志/XMODEM 上次路径）与本机相关，不导出。 */
+const CONFIG_PREF_KEYS = [
+  'zyxterm-col-order', // 首页类别列顺序
+  'zyxterm:serial-macros', // 串口自动化脚本
+  'zyxterm:global-macros', // 跨会话联动自动化脚本
+  'zyxterm:global-targets', // 联动脚本上次选中的连接
+  'zyxterm:gm-script-targets', // 各联动脚本各自记住的目标连接
+  'zyxterm:quick-commands' // 终端快捷命令分组
+] as const
+
 export default function App() {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([])
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -58,6 +70,8 @@ export default function App() {
   // 右击 tab 编辑时的来源 tab 会话 id：保存后按新参数刷新该 tab（不新开）
   const [editSessionId, setEditSessionId] = useState<string | null>(null)
   const editSessionIdRef = useRef<string | null>(null)
+  // 导入配置后自增，强制首页网格重新挂载（重新读取列顺序等 localStorage）
+  const [gridRev, setGridRev] = useState(0)
 
   const activeIdRef = useRef<string | null>(null)
   useEffect(() => {
@@ -68,6 +82,11 @@ export default function App() {
   useEffect(() => {
     tabsRef.current = tabs
   }, [tabs])
+
+  // 各会话最新状态缓存：连接很快的协议（如 VNC）可能在 createSession 的
+  // IPC 返回前就上报了 connected，事件到达时 tab 尚未创建会被丢弃，
+  // 建 tab 时优先取这里的缓存，避免卡在 connecting
+  const latestStatusRef = useRef<Map<string, SessionInfo>>(new Map())
 
   // 自定义标题栏：初始读取最大化状态 + 订阅主进程最大化/还原事件
   useEffect(() => {
@@ -91,6 +110,7 @@ export default function App() {
       .catch(() => setRdpAvailable(false))
 
     const unsub = window.api.onConnectionStatus((info: SessionInfo) => {
+      latestStatusRef.current.set(info.sessionId, info)
       setTabs((prev) =>
         prev.map((t) =>
           t.sessionId === info.sessionId
@@ -128,6 +148,10 @@ export default function App() {
     window.api.notifyTabsChanged(tabs.map((t) => t.sessionId))
   }, [tabs])
 
+  /** 建 tab 时读取状态缓存，避免覆盖比 IPC 快照更新的状态 */
+  const cachedInfo = (sessionId: string): SessionInfo | undefined =>
+    latestStatusRef.current.get(sessionId)
+
   /** 接管一个已存在（或新分离）的会话，不重新发起连接 */
   const adoptSession = useCallback(
     async (profile: ConnectionProfile, sessionId: string) => {
@@ -135,13 +159,14 @@ export default function App() {
         const info = (await window.api.listSessions()).find(
           (s) => s.sessionId === sessionId
         )
+        const fresh = cachedInfo(sessionId) ?? info
         const tab: Tab = {
           sessionId,
           name: profile.name,
           protocol: profile.protocol,
-          status: info?.status ?? 'connecting',
-          message: info?.message,
-          wsEndpoint: info?.wsEndpoint,
+          status: fresh?.status ?? 'connecting',
+          message: fresh?.message,
+          wsEndpoint: fresh?.wsEndpoint ?? info?.wsEndpoint,
           profile
         }
         setTabs((prev) => [...prev, tab])
@@ -195,13 +220,14 @@ export default function App() {
   const openProfile = useCallback(async (profile: ConnectionProfile) => {
     try {
       const info = await window.api.createSession(profile)
+      const fresh = cachedInfo(info.sessionId) ?? info
       const tab: Tab = {
         sessionId: info.sessionId,
         name: info.name,
         protocol: info.protocol,
-        status: info.status,
-        message: info.message,
-        wsEndpoint: info.wsEndpoint,
+        status: fresh.status,
+        message: fresh.message,
+        wsEndpoint: fresh.wsEndpoint ?? info.wsEndpoint,
         profile
       }
       setTabs((prev) => [...prev, tab])
@@ -243,13 +269,14 @@ export default function App() {
       try {
         await window.api.closeSession(oldSessionId)
         const info = await window.api.createSession(profile)
+        const fresh = cachedInfo(info.sessionId) ?? info
         const tab: Tab = {
           sessionId: info.sessionId,
           name: info.name,
           protocol: info.protocol,
-          status: info.status,
-          message: info.message,
-          wsEndpoint: info.wsEndpoint,
+          status: fresh.status,
+          message: fresh.message,
+          wsEndpoint: fresh.wsEndpoint ?? info.wsEndpoint,
           profile
         }
         setTabs((prev) => prev.map((t) => (t.sessionId === oldSessionId ? tab : t)))
@@ -382,6 +409,162 @@ export default function App() {
     []
   )
 
+  // ---------- 配置导出/导入 ----------
+
+  /** 导出：收集连接配置 + 渲染层持久化偏好，输入口令后由主进程整体
+   *  AES-256-GCM 加密写文件（口令不落盘，导入时凭口令解密） */
+  const handleExportConfig = useCallback(async () => {
+    const pass = await uiPrompt('请设置导出文件的加密口令（至少 4 个字符，\n导入时需要凭此口令解密）：', {
+      okText: '下一步',
+      password: true,
+      placeholder: '加密口令'
+    })
+    if (pass == null) return
+    if (pass.length < 4) {
+      void uiAlert('口令至少 4 个字符，已取消导出')
+      return
+    }
+    const pass2 = await uiPrompt('请再次输入口令确认：', {
+      okText: '导出',
+      password: true,
+      placeholder: '确认口令'
+    })
+    if (pass2 == null) return
+    if (pass !== pass2) {
+      void uiAlert('两次输入的口令不一致，已取消导出')
+      return
+    }
+    const prefs: Record<string, unknown> = {}
+    for (const key of CONFIG_PREF_KEYS) {
+      const raw = localStorage.getItem(key)
+      if (raw == null) continue
+      try {
+        prefs[key] = JSON.parse(raw)
+      } catch {
+        /* 跳过无法解析的脏数据 */
+      }
+    }
+    const backup: ConfigBackup = {
+      app: 'zyxterm',
+      format: 1,
+      exportedAt: new Date().toISOString(),
+      profiles,
+      preferences: prefs
+    }
+    try {
+      const res = await window.api.exportConfig(backup, pass)
+      if (res.canceled) return
+      if (res.ok) {
+        void uiAlert(
+          `导出成功（${backup.profiles.length} 个连接）。\n文件已整体加密，导入时凭口令解密。\n${res.path ?? ''}`
+        )
+      } else {
+        void uiAlert(`导出失败: ${res.error ?? '未知错误'}`)
+      }
+    } catch (e) {
+      void uiAlert(`导出失败: ${(e as Error).message}`)
+    }
+  }, [profiles])
+
+  /** 合并渲染层偏好（localStorage）：
+   *  - 带 id 的列表（自动化脚本、快捷命令分组）：按 id 合并，已存在保留本地
+   *  - 目标连接记忆（联动脚本选中的连接）：以导入为准
+   *  - 类别列顺序：保留本地（属本机布局偏好，不覆盖） */
+  const mergePreferences = useCallback((prefs: Record<string, unknown>): void => {
+    const ARRAY_MERGE_KEYS = [
+      'zyxterm:serial-macros',
+      'zyxterm:global-macros',
+      'zyxterm:quick-commands'
+    ]
+    for (const key of CONFIG_PREF_KEYS) {
+      if (!(key in prefs)) continue
+      const incoming = prefs[key]
+      if (ARRAY_MERGE_KEYS.includes(key) && Array.isArray(incoming)) {
+        try {
+          const local: unknown[] = JSON.parse(localStorage.getItem(key) ?? '[]')
+          const localIds = new Set(
+            local.map((x) => (x && typeof x === 'object' ? (x as { id?: unknown }).id : undefined))
+          )
+          const merged = [...(Array.isArray(local) ? local : [])]
+          for (const item of incoming) {
+            const id =
+              item && typeof item === 'object' ? (item as { id?: unknown }).id : undefined
+            if (id == null || localIds.has(id)) continue
+            merged.push(item)
+            localIds.add(id)
+          }
+          localStorage.setItem(key, JSON.stringify(merged))
+        } catch {
+          localStorage.setItem(key, JSON.stringify(incoming))
+        }
+      } else {
+        localStorage.setItem(key, JSON.stringify(incoming))
+      }
+    }
+  }, [])
+
+  /** 导入：选文件 → 凭口令解密 → 校验 → 合并式导入
+   *  （连接按 id 增量合并，已存在保留本地；已打开的会话不受影响） */
+  const handleImportConfig = useCallback(async () => {
+    let res
+    try {
+      res = await window.api.importConfig()
+    } catch (e) {
+      void uiAlert(`导入失败: ${(e as Error).message}`)
+      return
+    }
+    if (res.canceled) return
+    if (!res.ok || !res.file) {
+      void uiAlert(res.error ?? '导入失败')
+      return
+    }
+    const pass = await uiPrompt(
+      `请输入该配置文件的解密口令\n（导出于 ${res.file.meta.exportedAt.replace('T', ' ').slice(0, 19)}，含 ${res.file.meta.profileCount} 个连接）：`,
+      { okText: '解密', password: true, placeholder: '解密口令' }
+    )
+    if (pass == null) return
+    let dec
+    try {
+      dec = await window.api.decryptConfig(res.file, pass)
+    } catch (e) {
+      void uiAlert(`导入失败: ${(e as Error).message}`)
+      return
+    }
+    if (!dec.ok) {
+      void uiAlert(dec.error ?? '解密失败')
+      return
+    }
+    const backup = dec.data as ConfigBackup | undefined
+    if (
+      !backup ||
+      backup.app !== 'zyxterm' ||
+      backup.format !== 1 ||
+      !Array.isArray(backup.profiles)
+    ) {
+      void uiAlert('配置文件内容无效（可能已损坏）')
+      return
+    }
+    const ok = await uiConfirm(
+      `将合并导入 ${backup.profiles.length} 个连接配置及自动化脚本等偏好：\n` +
+        '新增的会添加，与本机已有配置同 id 的将保留本机版本。\n已打开的会话不受影响，是否继续？',
+      { okText: '合并导入' }
+    )
+    if (!ok) return
+    try {
+      const mr = await window.api.mergeProfiles(backup.profiles)
+      setProfiles(mr.profiles)
+      mergePreferences(backup.preferences ?? {})
+      setGridRev((v) => v + 1)
+      void uiAlert(
+        `导入完成：新增 ${mr.added} 个连接` +
+          (mr.skipped > 0 ? `，${mr.skipped} 个已存在（保留本机版本）` : '') +
+          '；自动化脚本/快捷命令已按 id 合并。'
+      )
+    } catch (e) {
+      void uiAlert(`导入失败: ${(e as Error).message}`)
+    }
+  }, [mergePreferences])
+
   // 覆盖弹窗（快捷选择/新建编辑/删除确认等原生 confirm 关闭后）关闭时，
   // 把键盘焦点还给当前会话页——否则 SSH 终端等会“键入无反应/输入不正常”
   const anyOverlayOpen = quickOpen || dialogOpen
@@ -508,6 +691,7 @@ export default function App() {
               ConnectionGrid 内部 grid 多列布局（flex 会压缩列宽成一列） */}
           <div className="home-pane" style={{ display: activeId === HOME_ID ? 'block' : 'none' }}>
             <ConnectionGrid
+              key={gridRev}
               profiles={profiles}
               rdpAvailable={rdpAvailable}
               onOpen={openProfile}
@@ -515,6 +699,8 @@ export default function App() {
               onEdit={openEdit}
               onDelete={handleDeleteProfile}
               onReorder={handleReorderProfiles}
+              onExport={() => void handleExportConfig()}
+              onImport={() => void handleImportConfig()}
             />
           </div>
           {tabs.map((t) => (

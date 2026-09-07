@@ -11,6 +11,10 @@ interface Props {
   onDelete: (id: string) => void
   /** 同协议类别内把 fromId 移到 toId 位置（持久化） */
   onReorder: (protocol: ProtocolType, fromId: string, toId: string) => void
+  /** 导出配置（连接 + 顺序 + 自动化脚本等）到本地文件 */
+  onExport: () => void
+  /** 从本地配置文件导入（覆盖当前配置） */
+  onImport: () => void
 }
 
 const DEFAULT_ORDER = PROTOCOLS.map((p) => p.key)
@@ -23,7 +27,9 @@ export default function ConnectionGrid({
   onNew,
   onEdit,
   onDelete,
-  onReorder
+  onReorder,
+  onExport,
+  onImport
 }: Props) {
   // 类别（列）顺序：本地持久化（纯 UI 偏好），无效值回退默认
   const [colOrder, setColOrder] = useState<ProtocolType[]>(() => {
@@ -64,6 +70,14 @@ export default function ConnectionGrid({
       <div className="grid-header">
         <h1>ZYXterm</h1>
         <p>双击连接配置打开 · 点击列标题「＋」新建该类连接 · 拖动列标题/连接可排序</p>
+        <div className="grid-tools">
+          <button className="grid-tool-btn" onClick={onExport}>
+            ⬆ 导出配置
+          </button>
+          <button className="grid-tool-btn" onClick={onImport}>
+            ⬇ 导入配置
+          </button>
+        </div>
       </div>
 
       <div className="grid-cols">

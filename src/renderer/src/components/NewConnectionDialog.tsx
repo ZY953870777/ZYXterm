@@ -707,6 +707,16 @@ export default function NewConnectionDialog({
                 />,
                 true
               )}
+              <div className="form-row">
+                <label className="form-field checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={rdp.keepAwake ?? false}
+                    onChange={(e) => setRdp({ ...rdp, keepAwake: e.target.checked })}
+                  />
+                  屏幕常亮（空闲 2 分钟自动阻止远端锁定/息屏）
+                </label>
+              </div>
             </>
           )}
         </div>
