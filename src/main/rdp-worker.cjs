@@ -116,9 +116,9 @@ function start(config) {
   // OPENSSL_MODULES 仅 Windows 需要（随包 legacy.dll）；Linux 用系统默认
   // ossl-modules 目录（legacy.so 在系统路径），设错会致 legacy 加载失败 → NLA 失败
   try {
+    const modulesDir = path.dirname(addonPath)
     if (process.platform === 'win32' || process.platform === 'darwin') {
       // Windows: 随包 legacy.dll；macOS: 随包 ossl-modules/*.dylib
-      const modulesDir = path.dirname(addonPath)
       process.env.OPENSSL_MODULES = modulesDir
     }
     const confPath = path.join(os.tmpdir(), 'zyxterm-openssl.cnf')

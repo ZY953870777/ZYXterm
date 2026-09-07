@@ -13,6 +13,7 @@ ZYXterm
 resources/freerdp/*
 !resources/freerdp/.gitkeep
 native/freerdp/build/
+build/freerdp-linux/
 native/freerdp/third_party/
 *.node
 

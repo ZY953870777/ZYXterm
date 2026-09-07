@@ -11,7 +11,7 @@ import {
 } from '@shared/types'
 import { parseMacroScript } from '../macroParser'
 import FileTree from './ssh/FileTree'
-import CommandHistory from './ssh/CommandHistory'
+import CommandHistory, { type HistEntry } from './ssh/CommandHistory'
 import CommandCompletion from './ssh/CommandCompletion'
 import QuickCommandBar, {
   QuickCommand,
@@ -100,12 +100,12 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
   }, [])
 
   // 历史 / 输入 / 补全
-  const [history, setHistory] = useState<string[]>([])
+  const [history, setHistory] = useState<HistEntry[]>([])
   const [completion, setCompletion] = useState<string[]>([])
   const [completionIdx, setCompletionIdx] = useState(0)
   const [completionPos, setCompletionPos] = useState({ x: 0, y: 0 })
   const inputRef = useRef('')
-  const historyRef = useRef<string[]>([])
+  const historyRef = useRef<HistEntry[]>([])
   const completionRef = useRef<string[]>([])
   const completionIdxRef = useRef(0)
   const sessionIdRef = useRef(sessionId)
@@ -223,12 +223,33 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
         passwordModeRef = false
       }
     }
-    const unsubData = window.api.onTerminalData((id, data) => {
-      if (id === sessionIdRef.current) {
-        term.write(data)
-        detectPasswordPrompt(data)
+    // 先订阅并排队，再向主进程请求积压输出回放（冷启动首次连接时终端挂载可能
+    // 慢于 SSH 握手，最早的 motd/提示符输出会先于订阅到达），按 seq 去重后写入
+    let synced = false
+    let alive = true
+    const pendingData: Array<{ seq?: number; data: string }> = []
+    const feed = (data: string): void => {
+      term.write(data)
+      detectPasswordPrompt(data)
+    }
+    const unsubData = window.api.onTerminalData((id, data, seq) => {
+      if (id !== sessionIdRef.current) return
+      if (!synced) {
+        pendingData.push({ seq, data })
+        return
       }
+      feed(data)
     })
+    void window.api.terminalSync(sessionIdRef.current).then(
+      ({ seq: lastSeq, data }) => {
+        if (!alive) return
+        if (data) feed(data)
+        for (const p of pendingData) {
+          if (p.seq === undefined || p.seq > lastSeq) feed(p.data)
+        }
+        synced = true
+      }
+    )
 
     const onDataDisposable = term.onData((data) => {
       const sid = sessionIdRef.current
@@ -318,6 +339,7 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
     term.focus()
 
     return () => {
+      alive = false
       ro.disconnect()
       unsubData()
       onDataDisposable.dispose()
@@ -353,10 +375,18 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
   const submitCommand = useCallback((cmd: string) => {
     const c = cmd.trim()
     if (!c) return
+    // 记录执行位置锚点：当前输入行距缓冲区底部的行距（重复命令也能各自定位）
+    const term = termRef.current
+    let tail = 0
+    if (term) {
+      const b = term.buffer.active
+      tail = b.length - 1 - (b.baseY + b.cursorY)
+      if (tail < 0) tail = 0
+    }
     // 保留所有历史（不去重）：重复命令也逐条记录，避免“单击跳转到执行位置”因
     // 合并而错位/混乱
     setHistory((prev) => {
-      const next = [c, ...prev].slice(0, 200)
+      const next = [{ cmd: c, tail }, ...prev].slice(0, 200)
       historyRef.current = next
       return next
     })
@@ -415,7 +445,9 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
     // 候选去重（历史含重复命令时避免下拉出现重复项）
     const matches = Array.from(
       new Set(
-        historyRef.current.filter((h) => h.startsWith(input) && h !== input)
+        historyRef.current
+          .map((h) => h.cmd)
+          .filter((c) => c.startsWith(input) && c !== input)
       )
     ).slice(0, 8)
     completionRef.current = matches
@@ -513,18 +545,28 @@ export default function TerminalView({ sessionId, protocol, status }: Props) {
   )
 
   // ---------- 历史跳转 / 重跑 ----------
-  const jumpToHistory = useCallback((cmd: string) => {
+  const jumpToHistory = useCallback((entry: HistEntry) => {
     const term = termRef.current
     if (!term) return
     const buffer = term.buffer.active
-    for (let y = buffer.length - 1; y >= 0; y--) {
-      const line = buffer.getLine(y)
+    // 优先用执行时记录的锚点（底部行距）还原绝对行号，重复命令可各自定位；
+    // 锚点失效（行已被裁剪/清屏）时回退为从底部向上按文本查找最近一次
+    const y = buffer.length - 1 - entry.tail
+    const anchored =
+      y >= 0 &&
+      y < buffer.length &&
+      buffer.getLine(y)?.translateToString(true).includes(entry.cmd)
+    if (anchored) {
+      term.scrollLines(y - buffer.viewportY)
+      term.selectLines(y, y)
+      return
+    }
+    for (let i = buffer.length - 1; i >= 0; i--) {
+      const line = buffer.getLine(i)
       if (!line) continue
-      const text = line.translateToString(true)
-      if (text.includes(cmd)) {
-        const row = y - buffer.baseY
-        term.scrollLines(row - buffer.viewportY)
-        term.selectLines(row, row)
+      if (line.translateToString(true).includes(entry.cmd)) {
+        term.scrollLines(i - buffer.viewportY)
+        term.selectLines(i, i)
         break
       }
     }

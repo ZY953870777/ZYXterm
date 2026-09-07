@@ -1,5 +1,8 @@
 import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import { Client, ClientChannel, SFTPWrapper } from 'ssh2'
+import type { Stats } from 'ssh2'
 import {
   ConnectionProfile,
   ConnectionStatus,
@@ -8,8 +11,20 @@ import {
 } from '@shared/types'
 import { BaseSession, SendFn } from './types'
 
-const MARK_START = '\x01ZYTPWD\x02'
-const MARK_END = '\x01ZYTEND\x02'
+/** OSC 7（shell 集成标准序列）：file://host/path，BEL 或 ST 结束 */
+const OSC7_RE = /\x1b\]7;file:\/\/([^\x07\x1b]*)(?:\x07|\x1b\\)/
+
+/** 诊断日志：ZYXTERM_DEBUG=1 启动时记录 SSH 输出流处理过程，便于定位丢输出问题 */
+const DEBUG = !!process.env.ZYXTERM_DEBUG
+const DEBUG_LOG = path.join(os.tmpdir(), 'zyxterm-ssh.log')
+function dbg(msg: string): void {
+  if (!DEBUG) return
+  try {
+    fs.appendFileSync(DEBUG_LOG, `${Date.now()} ${msg}\n`)
+  } catch {
+    /* ignore */
+  }
+}
 
 /** POSIX 路径归一化 */
 function normalizePosix(p: string): string {
@@ -87,8 +102,13 @@ export class SSHSession implements BaseSession {
   private oldPwd: string | null = null
   private home = '/'
   private cwdWaiters: Array<(cwd: string) => void> = []
+  /** 输出缓冲：仅用于拼接跨 TCP 分片的 OSC 7 序列 */
   private outBuf = ''
-  private pendingMarkTime = 0
+  /** 待从输出流中剥离的注入命令回显（PTY 会回显输入，需在输出端过滤） */
+  private pendingEcho = ''
+  private echoHold = 0
+  private echoStripped = 0
+  private echoSeen = 0
   /** 联动自动化 RX 订阅者 */
   private dataListeners = new Set<(text: string) => void>()
 
@@ -148,6 +168,7 @@ export class SSHSession implements BaseSession {
     }
 
     return new Promise<void>((resolve, reject) => {
+      dbg(`connect ${cfg.host}:${cfg.port} attempt start`)
       let settled = false
       const timer = setTimeout(() => {
         if (settled) return
@@ -177,18 +198,24 @@ export class SSHSession implements BaseSession {
       }
 
       client.once('ready', () => {
-        // 通过 exec 启动交互式 bash，并在启动前设置 PROMPT_COMMAND（cwd 跟踪标记）。
-        // 命令参数经 SSH exec channel 传递、不进入终端输入流，因此不会在终端回显，
-        // 从而隐藏原先通过 stream.write 设置的 export PROMPT_COMMAND=... 命令。
-        const ptyCmd =
-          "export PROMPT_COMMAND='printf \"\\x01ZYTPWD\\x02\";pwd;printf \"\\x01ZYTEND\\x02\";'; exec bash -i"
-        client.exec(ptyCmd, { pty: { term: 'xterm-256color', cols: 120, rows: 30 } }, (err, stream) => {
+        dbg('client ready')
+        // 使用真正的 shell channel（交互式登录）：sshd 会输出 motd / Last login 等登录信息，
+        // 这些在 exec channel 上是看不到的。
+        client.shell({ term: 'xterm-256color', cols: 120, rows: 30 }, (err, stream) => {
           if (err) {
+            dbg(`shell error: ${err.message}`)
             done(err)
             return
           }
+          dbg('shell channel opened')
           this.stream = stream
           stream.on('data', (data: Buffer) => this.onData(data))
+          // 扩展数据（stderr）：pty 会话通常合并进主输出，无 pty/pam 阶段输出
+          // 可能走扩展通道，一并转发避免丢登录信息
+          stream.stderr?.on('data', (data: Buffer) => {
+            dbg(`stderr len=${data.length} raw=${JSON.stringify(data.toString('utf8').slice(0, 160))}`)
+            this.onData(data)
+          })
           stream.on('close', () => {
             this.setStatus('disconnected', 'SSH 会话已关闭')
           })
@@ -197,6 +224,8 @@ export class SSHSession implements BaseSession {
           })
           this.setStatus('connected')
           done()
+          // 每次提示符前通过 OSC 7 上报 cwd（iTerm2/VS Code 等采用的标准 shell 集成方式）
+          void this.injectOsc7Hook()
           // 连接成功后自动执行用户自定义命令（稍等 shell 提示符就绪后再回车执行）
           const startup = (cfg.startupCommand ?? '').trim()
           if (startup) {
@@ -210,7 +239,14 @@ export class SSHSession implements BaseSession {
         })
       })
 
+      // SSH 认证前 banner（/etc/issue.net 等），在 shell 数据之前送达终端
+      client.on('banner', (msg: string) => {
+        dbg(`banner: ${JSON.stringify(msg.slice(0, 120))}`)
+        this.send('terminal:data', this.sessionId, msg + '\r\n')
+      })
+
       client.on('error', (err: Error) => {
+        dbg(`client error: ${err.message}`)
         done(err)
       })
 
@@ -311,11 +347,13 @@ export class SSHSession implements BaseSession {
     }
   }
 
-  /** 向主 shell 注入 pwd 标记命令并解析（用于确认目录 / 手动刷新） */
+  /** 向主 shell 注入 OSC 7 上报命令（用于确认目录 / 手动刷新） */
   private syncCwd(): Promise<string> {
     return new Promise((resolve) => {
       this.cwdWaiters.push(resolve)
-      this.write(`printf '${MARK_START}'; pwd; printf '${MARK_END}\n'`)
+      this.write(
+        `printf '\\033]7;file://%s%s\\a' "$(hostname)" "$PWD"\n`
+      )
       setTimeout(() => {
         const i = this.cwdWaiters.indexOf(resolve)
         if (i >= 0) this.cwdWaiters.splice(i, 1)
@@ -324,43 +362,119 @@ export class SSHSession implements BaseSession {
     })
   }
 
-  /** shell 输出处理：提取 pwd 标记段并过滤，其余转发给终端 */
-  private onData(data: Buffer): void {
-    this.outBuf += data.toString('utf8')
-    let out = ''
-    while (this.outBuf.length > 0) {
-      const start = this.outBuf.indexOf(MARK_START)
-      if (start < 0) {
-        out += this.outBuf
-        this.outBuf = ''
+  /** 检测登录 shell 类型并注入 OSC 7 上报钩子（bash/zsh/fish），回显在输出端剥离 */
+  private async injectOsc7Hook(): Promise<void> {
+    let shell = ''
+    try {
+      shell = (await this.exec('echo $SHELL')).stdout.trim()
+    } catch {
+      /* 检测失败按 bash 处理 */
+    }
+    let snippet: string
+    if (shell.includes('zsh')) {
+      snippet =
+        "autoload -Uz add-zsh-hook; __zy_osc7() { printf '\\033]7;file://%s%s\\a' \"$(hostname)\" \"$PWD\" }; add-zsh-hook precmd __zy_osc7"
+    } else if (shell.includes('fish')) {
+      snippet =
+        'function __zy_osc7 --on-event fish_prompt; printf \'\\033]7;file://%s%s\\a\' (hostname) (pwd); end'
+    } else {
+      snippet =
+        'export PROMPT_COMMAND=\'printf "\\033]7;file://%s%s\\a" "$(hostname)" "$PWD"\''
+    }
+    this.clearEchoFilter()
+    this.pendingEcho = snippet
+    dbg(`inject snippet=${JSON.stringify(snippet)}`)
+    this.write(snippet + '\n')
+  }
+
+  /** 回显过滤结束（匹配完成或兜底放弃） */
+  private clearEchoFilter(): void {
+    this.pendingEcho = ''
+    this.echoHold = 0
+    this.echoStripped = 0
+    this.echoSeen = 0
+  }
+
+  /** 从输出缓冲中剥离注入命令的终端回显（字节级精确匹配） */
+  private stripPendingEcho(): void {
+    if (!this.pendingEcho) return
+    // 回显最多两处：PTY 行缓冲的就地回显 + readline 接管输入后的重绘
+    for (;;) {
+      const idx = this.outBuf.indexOf(this.pendingEcho)
+      if (idx < 0) break
+      this.outBuf =
+        this.outBuf.slice(0, idx) +
+        this.outBuf.slice(idx + this.pendingEcho.length)
+      this.echoStripped++
+    }
+    if (this.echoStripped >= 2) {
+      this.clearEchoFilter()
+      return
+    }
+    // 兜底：自注入起已流出大量数据仍未凑齐回显，放弃过滤避免长期扣住尾部字节
+    if (this.echoSeen > 16384) {
+      this.clearEchoFilter()
+      return
+    }
+    // 尾部若是回显被 TCP 分片截断的前缀，保留待下一片拼齐
+    this.echoHold = 0
+    for (let len = Math.min(this.pendingEcho.length, this.outBuf.length); len > 0; len--) {
+      if (this.outBuf.endsWith(this.pendingEcho.slice(0, len))) {
+        this.echoHold = len
         break
       }
-      out += this.outBuf.slice(0, start)
-      const end = this.outBuf.indexOf(MARK_END, start)
-      if (end < 0) {
-        // 标记未完整：加超时保护，避免正常输出恰含标记开头序列时
-        // 一直等待结束标记而吞掉输出（导致终端卡住）
-        const now = Date.now()
-        if (this.pendingMarkTime === 0) this.pendingMarkTime = now
-        if (now - this.pendingMarkTime > 800) {
-          out += this.outBuf
-          this.outBuf = ''
-          this.pendingMarkTime = 0
-          break
-        }
-        this.outBuf = this.outBuf.slice(start)
-        break
-      }
-      const cwd = this.outBuf.slice(start + MARK_START.length, end).trim()
-      this.cwd = cwd
+    }
+  }
+
+  /** 解析 OSC 7 的 file://host/path 并更新 cwd */
+  private onOsc7(uri: string): void {
+    try {
+      const path = decodeURIComponent(uri.slice(uri.indexOf('/')))
+      if (!path.startsWith('/')) return
+      this.cwd = path
       const waiters = this.cwdWaiters
       this.cwdWaiters = []
-      waiters.forEach((r) => r(cwd))
-      this.send('ssh:cwd-changed', this.sessionId, cwd)
-      this.outBuf = this.outBuf.slice(end + MARK_END.length)
-      this.pendingMarkTime = 0
+      waiters.forEach((r) => r(path))
+      this.send('ssh:cwd-changed', this.sessionId, path)
+    } catch {
+      /* 非法 URI，忽略 */
     }
+  }
+
+  /** shell 输出处理：剥离注入命令回显与 OSC 7 序列，其余转发给终端 */
+  private onData(data: Buffer): void {
+    this.outBuf += data.toString('utf8')
+    dbg(`onData len=${data.length} raw=${JSON.stringify(data.toString('utf8').slice(0, 160))}`)
+    if (this.pendingEcho) {
+      this.echoSeen += data.length
+      this.stripPendingEcho()
+    }
+    let out = ''
+    for (;;) {
+      const m = this.outBuf.match(OSC7_RE)
+      if (!m || m.index === undefined) break
+      out += this.outBuf.slice(0, m.index)
+      this.onOsc7(m[1])
+      this.outBuf = this.outBuf.slice(m.index + m[0].length)
+    }
+    // 保留可能被 TCP 分片截断的 OSC 7 尾部（开头序列的前缀、或未收到结束符的序列），
+    // 其余立即转发；残留过长则视为普通输出直接放行，避免吞输出卡住终端
+    let hold = this.echoHold
+    const START = '\x1b]7;'
+    for (let len = Math.min(START.length, this.outBuf.length); len > 0; len--) {
+      if (this.outBuf.endsWith(START.slice(0, len))) {
+        hold = Math.max(hold, len)
+        break
+      }
+    }
+    const open = this.outBuf.lastIndexOf(START)
+    if (open >= 0 && this.outBuf.length - open < 1024) {
+      hold = Math.max(hold, this.outBuf.length - open)
+    }
+    out += this.outBuf.slice(0, this.outBuf.length - hold)
+    this.outBuf = this.outBuf.slice(this.outBuf.length - hold)
     if (out) {
+      dbg(`send len=${out.length} hold=${hold} out=${JSON.stringify(out.slice(0, 160))}`)
       this.send('terminal:data', this.sessionId, out)
       for (const cb of this.dataListeners) {
         try {
@@ -415,25 +529,64 @@ export class SSHSession implements BaseSession {
     })
   }
 
+  /** SFTP realpath：交给服务器解析 `~`/相对路径/符号链接（受限时回退本地解析） */
+  private async sftpRealpath(p: string): Promise<string> {
+    try {
+      const sftp = await this.ensureSftp()
+      return await new Promise<string>((resolve, reject) => {
+        sftp.realpath(p, (err, abs) => (err ? reject(err) : resolve(abs)))
+      })
+    } catch {
+      return resolveCd(this.cwd ?? '/', p.replace(/^~(?=\/|$)/, this.home), this.home)
+    }
+  }
+
   /** 浏览指定目录（不改变主 shell 目录），默认当前目录 */
   async listDir(
     path?: string
   ): Promise<{ cwd: string; entries: SshDirEntry[]; error?: string }> {
     const target = path ?? this.cwd ?? '/'
     try {
-      const { stdout, stderr } = await this.exec(
-        `cd ${shellQuote(target)} && ls -la 2>&1`
-      )
-      const entries = parseLs(stdout || stderr)
+      // 优先走 SFTP 协议（结构化数据，无 ls 文本解析歧义，受限 shell 也可用）
+      const sftp = await this.ensureSftp()
+      const list = await new Promise<
+        Array<{ filename: string; attrs: Stats }>
+      >((resolve, reject) => {
+        sftp.readdir(target, (err, files) => (err ? reject(err) : resolve(files)))
+      })
+      const entries: SshDirEntry[] = list.map((e) => {
+        const attrs = e.attrs
+        const isDir = typeof attrs.isDirectory === 'function' && attrs.isDirectory()
+        const isLink = typeof attrs.isSymbolicLink === 'function' && attrs.isSymbolicLink()
+        return {
+          name: e.filename,
+          type: isDir ? 'dir' : isLink ? 'link' : 'file',
+          size: e.attrs.size,
+          mtime: new Date(e.attrs.mtime * 1000).toLocaleString()
+        }
+      })
       return { cwd: target, entries }
-    } catch (e) {
-      return { cwd: target, entries: [], error: (e as Error).message }
+    } catch {
+      // 服务器禁用/限制了 SFTP 子系统时降级为 exec + ls
+      try {
+        const { stdout, stderr } = await this.exec(
+          `cd ${shellQuote(target)} && ls -la 2>&1`
+        )
+        return { cwd: target, entries: parseLs(stdout || stderr) }
+      } catch (e) {
+        return { cwd: target, entries: [], error: (e as Error).message }
+      }
     }
   }
 
   /** 手动切换目录：向主 shell 写入 cd 并更新 cwd */
   async cd(path: string): Promise<{ cwd: string; entries: SshDirEntry[] }> {
-    const target = resolveCd(this.cwd ?? '/', path, this.home, this.oldPwd)
+    let target: string
+    if (path === '-') {
+      target = this.oldPwd || this.cwd || this.home
+    } else {
+      target = path === '~' ? this.home : await this.sftpRealpath(path)
+    }
     this.write(`cd ${shellQuote(target)}\n`)
     if (this.cwd !== target) this.oldPwd = this.cwd
     this.cwd = target

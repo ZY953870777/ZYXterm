@@ -126,10 +126,16 @@ export default function SessionTabs({
 
   const closeMenu = (): void => setMenu(null)
 
-  // 悬停 tab 显示连接状态（fixed 定位，避免被 .tabs 的 overflow 裁剪）
+  // 悬停中的 tab 被关闭/移除时元素直接卸载，onMouseLeave 不会触发，需手动清掉 tooltip
+  useEffect(() => {
+    if (tip && !tabs.some((t) => t.sessionId === tip.tab.sessionId)) setTip(null)
+  }, [tabs, tip])
+
+  // 悬停 tab 显示连接状态（fixed 定位，避免被 .tabs 的 overflow 裁剪）。
+  // tab 栏在标题栏里贴着窗口顶部，tooltip 只能显示在 tab 下方
   const showTip = (e: React.MouseEvent<HTMLDivElement>, tab: Tab): void => {
     const r = e.currentTarget.getBoundingClientRect()
-    setTip({ x: r.left + r.width / 2, y: r.top, tab })
+    setTip({ x: r.left + r.width / 2, y: r.bottom + 8, tab })
   }
 
   /** 依据鼠标横向位置计算插入目标 index（仅会话 tab，排除固定首页） */
@@ -330,7 +336,7 @@ export default function SessionTabs({
       {tip && (
         <div
           className="tab-tooltip"
-          style={{ left: tip.x, top: tip.y - 8 }}
+          style={{ left: tip.x, top: tip.y }}
           data-status={tip.tab.status}
         >
           <div className="tab-tooltip-name">{tip.tab.name}</div>

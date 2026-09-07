@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
-import { randomUUID } from 'crypto'
+import { randomUUID, scryptSync, createCipheriv, createDecipheriv, randomBytes } from 'crypto'
 import { appendFileSync, promises as fsp } from 'fs'
 import { ConnectionManager } from './connections/manager'
 import { SerialSession } from './connections/serial'
@@ -10,6 +10,7 @@ import { ProfileStore } from './store'
 import { checkForUpdates, downloadUpdate, quitAndInstall } from './updater'
 import { WindowManager } from './window-manager'
 import {
+  ConfigBackupFile,
   ConnectionProfile,
   GlobalMacroStep,
   NewProfileInput,
@@ -108,12 +109,131 @@ export function registerIpc(
     }
   )
 
+  // 配置导入（合并式）：按 id 增量合并——已存在的 id 保留本地版本，
+  // 新增的追加到同协议类别的末尾（保持首页同类内顺序）。返回合并结果与统计。
+  ipcMain.handle('profiles:merge', (_e, incoming: ConnectionProfile[]) => {
+    const local = store.load()
+    const localIds = new Set(local.map((p) => p.id))
+    const merged = [...local]
+    let added = 0
+    let skipped = 0
+    for (const p of Array.isArray(incoming) ? incoming : []) {
+      if (!p || typeof p.id !== 'string') continue
+      if (localIds.has(p.id)) {
+        skipped++
+        continue
+      }
+      // 插到同类最后一项之后；本地尚无该类时追加到末尾
+      let insertAt = merged.length
+      for (let i = merged.length - 1; i >= 0; i--) {
+        if (merged[i].protocol === p.protocol) {
+          insertAt = i + 1
+          break
+        }
+      }
+      merged.splice(insertAt, 0, p)
+      localIds.add(p.id)
+      added++
+    }
+    if (added > 0) store.save(merged)
+    return { profiles: added > 0 ? store.load() : local, added, skipped }
+  })
+
+  // ---------- 配置导出/导入 ----------
+  // 导出：渲染层收集完整配置 + 加密口令 → 主进程用口令派生密钥（scrypt）
+  // 整体 AES-256-GCM 加密后弹保存对话框写文件。口令不落盘，跨机器导入时凭口令解密。
+  ipcMain.handle('config:export', async (_e, data: unknown, passphrase: string) => {
+    try {
+      if (typeof passphrase !== 'string' || passphrase.length < 4) {
+        return { ok: false, error: '加密口令至少 4 个字符' }
+      }
+      const backup = data as { profiles?: unknown[] }
+      const salt = randomBytes(16)
+      const iv = randomBytes(12)
+      const key = scryptSync(passphrase, salt, 32)
+      const cipher = createCipheriv('aes-256-gcm', key, iv)
+      const plaintext = Buffer.from(JSON.stringify(data), 'utf8')
+      const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
+      const file: ConfigBackupFile = {
+        app: 'zyxterm',
+        format: 2,
+        cipher: 'aes-256-gcm',
+        kdf: 'scrypt',
+        salt: salt.toString('base64'),
+        iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        data: encrypted.toString('base64'),
+        meta: {
+          exportedAt: new Date().toISOString(),
+          profileCount: Array.isArray(backup?.profiles) ? backup.profiles.length : 0
+        }
+      }
+      const res = await dialog.showSaveDialog({
+        title: '导出配置（已加密，需凭口令导入）',
+        defaultPath: `zyxterm-config-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (res.canceled || !res.filePath) return { ok: true, canceled: true }
+      await fsp.writeFile(res.filePath, JSON.stringify(file, null, 2), 'utf8')
+      return { ok: true, path: res.filePath }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  })
+
+  // 导入第一步：弹打开对话框读取文件，只解析外层信封（密文不解）
+  ipcMain.handle('config:import', async () => {
+    try {
+      const res = await dialog.showOpenDialog({
+        title: '导入配置文件',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (res.canceled || !res.filePaths[0]) return { ok: true, canceled: true }
+      const parsed = JSON.parse(await fsp.readFile(res.filePaths[0], 'utf8'))
+      const file = parsed as ConfigBackupFile
+      if (
+        !file ||
+        file.app !== 'zyxterm' ||
+        file.format !== 2 ||
+        file.cipher !== 'aes-256-gcm' ||
+        !file.data
+      ) {
+        return { ok: false, error: '不是有效的 ZYXterm 配置导出文件' }
+      }
+      return { ok: true, file }
+    } catch (e) {
+      return { ok: false, error: `读取或解析配置文件失败: ${(e as Error).message}` }
+    }
+  })
+
+  // 导入第二步：凭口令解密，返回明文 ConfigBackup（口令错误时 GCM 认证失败）
+  ipcMain.handle('config:decrypt', (_e, file: ConfigBackupFile, passphrase: string) => {
+    try {
+      const key = scryptSync(passphrase ?? '', Buffer.from(file.salt, 'base64'), 32)
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        key,
+        Buffer.from(file.iv, 'base64')
+      )
+      decipher.setAuthTag(Buffer.from(file.tag, 'base64'))
+      const decrypted = Buffer.concat([
+        decipher.update(Buffer.from(file.data, 'base64')),
+        decipher.final()
+      ])
+      return { ok: true, data: JSON.parse(decrypted.toString('utf8')) }
+    } catch {
+      return { ok: false, error: '口令错误或文件已损坏' }
+    }
+  })
+
   // ---------- 会话管理 ----------
   ipcMain.handle('session:create', (_e, profile: ConnectionProfile) =>
     manager.create(profile)
   )
   ipcMain.handle('session:close', (_e, id: string) => manager.close(id))
   ipcMain.handle('session:list', () => manager.list())
+  ipcMain.handle('terminal:sync', (_e, id: string) => manager.terminalSync(id))
 
   // ---------- 终端数据 ----------
   ipcMain.on('terminal:write', (_e, id: string, data: string) => {

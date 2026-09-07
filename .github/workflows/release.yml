@@ -154,8 +154,10 @@ jobs:
           path: dist/*.exe
 
   # ============================================================
-  # Linux x64：apt 装系统 freerdp3 开发库，node-gyp 编 addon，
-  # 随包分发 libfreerdp3/libwinpr3 .so（rpath=$ORIGIN 加载）
+  # Linux x64：在 glibc 2.35 基线容器（Ubuntu 22.04）内编译 FreeRDP3 addon +
+  # 收集运行库到 build/freerdp-linux/（随包，rpath=$ORIGIN），宿主 electron-builder
+  # 打包。目的：产物兼容 Ubuntu 22.04+（glibc≥2.35）。切勿在 ubuntu-latest
+  # (24.04, glibc2.39) 上编随包库——那样会要求 GLIBC_2.38，在较旧发行版无法加载。
   # ============================================================
   release-linux:
     runs-on: ubuntu-latest
@@ -166,62 +168,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install FreeRDP3 dev + build tools
-        run: |
-          sudo apt-get update
-          # Ubuntu 24.04+ 的 FreeRDP3 开发包名为 freerdp3-dev（fallback 兼容）；
-          # patchelf 用于给 freerdp 运行库设置 rpath（随包加载依赖）
-          sudo apt-get install -y freerdp3-dev patchelf \
-            || sudo apt-get install -y libfreerdp3-dev patchelf \
-            || sudo apt-get install -y libfreerdp-dev patchelf
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Compile freerdp addon (Linux)
-        shell: bash
+      # 缓存 FreeRDP3 源编译结果（glibc 2.35 基线），跨 run 复用避免每次重编
+      - name: Cache FreeRDP3 source build
+        uses: actions/cache@v4
+        with:
+          path: docker-cache/freerdp3
+          key: freerdp3-src-linux-glibc235
+
+      # 编译 addon + 收集 libfreerdp3/libwinpr3/全部依赖 到 build/freerdp-linux/
+      # （package.json 的 linux extraResources 打包时合并为包内
+      #   resources/freerdp/build/Release，不触碰 resources/freerdp/）
+      # 在 ubuntu:22.04 容器内以 root 运行 prepare（容器无 freerdp3-dev →
+      # prepare 自动 apt 装依赖并源编译 FreeRDP 3.30，产物 glibc 2.35）
+      - name: Prepare FreeRDP Linux resources (glibc-2.35 基线)
         run: |
-          npm install --no-save --ignore-scripts node-addon-api node-gyp
-          # npm ci 在后续步骤才执行，此处 node_modules/electron 尚不存在，从 package.json 读版本。
-          # 注意：bash 赋值不能带 $ 前缀（$ev= 会把 =... 当命令执行）
-          ev=$(node -e "console.log(require('./package.json').devDependencies.electron.replace(/[\^~]/,''))")
-          npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=x64 --dist-url=https://electronjs.org/headers
-          mkdir -p resources/freerdp/build/Release
-          cp -f native/freerdp/build/Release/freerdp.node resources/freerdp/build/Release/
-          # 复制 FreeRDP 运行库到 addon 同目录（rpath=$ORIGIN 加载）
-          for lib in libfreerdp3.so.3 libwinpr3.so.3; do
-            src=$(find /usr/lib -name "$lib*" -type f 2>/dev/null | head -1)
-            if [ -n "$src" ]; then
-              cp -f "$src" "resources/freerdp/build/Release/$lib"
-              echo "  ✓ 已准备 $lib"
-            fi
-          done
-          # 用 ldd 收集 addon 与 freerdp 运行库的全部动态依赖（如 ICU 等）随包分发，
-          # 避免目标机因版本不同报 "libicuuc.so.74: cannot open shared object file"
-          collect_deps() {
-            ldd "$1" 2>/dev/null | grep '=>' | awk '{print $3}' | while read -r so; do
-              case "$so" in /*) ;; *) continue ;; esac
-              base=$(basename "$so")
-              # 跳过目标系统必有的 glibc 基础库
-              case "$base" in
-                libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libgcc_s.so*|libstdc++.so*|ld-linux*) continue ;;
-              esac
-              if [ ! -f "resources/freerdp/build/Release/$base" ]; then
-                cp -f "$so" "resources/freerdp/build/Release/$base" 2>/dev/null || true
-                echo "  ✓ 随包依赖: $base"
-              fi
-            done
-          }
-          collect_deps "resources/freerdp/build/Release/freerdp.node"
-          collect_deps "resources/freerdp/build/Release/libfreerdp3.so.3"
-          collect_deps "resources/freerdp/build/Release/libwinpr3.so.3"
-          # 给 freerdp 运行库设 rpath=$ORIGIN（--force-rpath=DT_RPATH，找不到再回退系统路径），
-          # 使其依赖（ICU 等）从自身目录加载；不设全局 LD_LIBRARY_PATH，避免影响 Electron utility 进程
-          patchelf --set-rpath '$ORIGIN' --force-rpath resources/freerdp/build/Release/libfreerdp3.so.3
-          patchelf --set-rpath '$ORIGIN' --force-rpath resources/freerdp/build/Release/libwinpr3.so.3
-          echo "  ✓ 已为 freerdp 运行库设置 rpath=\$ORIGIN"
+          docker run --rm \
+            -v "$PWD:/project" -w /project \
+            -e FREERDP_CACHE=/project/docker-cache/freerdp3 \
+            ubuntu:22.04 \
+            bash -c '
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq curl ca-certificates build-essential python3 make git pkg-config file patchelf zlib1g-dev libssl-dev liburiparser-dev libkrb5-dev libicu-dev libusb-1.0-0-dev >/dev/null
+              (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true)
+              apt-get install -y -qq nodejs >/dev/null 2>&1 || true
+              echo "container node: $(node -v 2>/dev/null || echo MISSING)"
+              bash scripts/prepare-freerdp-linux.sh
+            '
+
+      # 容器以 root 产出（build/freerdp-linux、native/freerdp、node_modules 里
+      # 装了 node-addon-api/node-gyp 等），全部改回 runner 属主，否则宿主 npm ci
+      # 清理 node_modules 会 EACCES
+      - name: Fix ownership of container outputs
+        run: |
+          sudo chown -R "$USER" build/freerdp-linux native/freerdp node_modules 2>/dev/null || true
+          sudo chown -R "$USER" docker-cache 2>/dev/null || true
 
       - name: Install project deps
         run: npm ci --ignore-scripts
@@ -307,16 +294,21 @@ jobs:
           npx node-gyp rebuild --directory=native/freerdp --target=$ev --arch=arm64 --dist-url=https://electronjs.org/headers
           cp -f native/freerdp/build/Release/freerdp.node "$D/"
 
-          # 递归收集非系统 dylib 依赖到 addon 同目录（freerdp3/winpr3/openssl…）
+          # 递归收集非系统 dylib 依赖到 addon 同目录（freerdp3/winpr3/openssl…）；
+          # macOS 动态库常以 @rpath/ 引用依赖，需按 brew lib 目录解析后随包
           collect() {
             local lib="$1"
             otool -L "$lib" 2>/dev/null | awk '/^\t/{print $1}' | while read -r dep; do
               case "$dep" in
-                @loader_path/*|@rpath/*|/usr/lib/*|/System/*) continue ;;
+                @loader_path/*|/usr/lib/*|/System/*) continue ;;
               esac
               local base; base=$(basename "$dep")
-              if [ -f "$dep" ] && [ ! -f "$D/$base" ]; then
-                cp -f "$dep" "$D/$base" 2>/dev/null || true
+              local src="$dep"
+              case "$dep" in
+                @rpath/*) src="$FP/lib/$base" ;;
+              esac
+              if [ -f "$src" ] && [ ! -f "$D/$base" ]; then
+                cp -f "$src" "$D/$base" 2>/dev/null || true
                 collect "$D/$base"
               fi
             done

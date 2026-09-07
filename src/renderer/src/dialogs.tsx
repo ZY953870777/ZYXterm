@@ -9,19 +9,26 @@ import { useSyncExternalStore } from 'react'
 import { createRoot, Root } from 'react-dom/client'
 
 interface DialogReq {
-  kind: 'alert' | 'confirm'
+  kind: 'alert' | 'confirm' | 'prompt'
   message: string
   danger?: boolean
   okText?: string
-  resolve: (ok: boolean) => void
+  /** prompt：输入框占位文本 */
+  placeholder?: string
+  /** prompt：是否为密码输入（不回显） */
+  password?: boolean
+  /** prompt：确定时返回的输入值；alert/confirm 恒 true */
+  resolve: (ok: boolean | string) => void
   prevFocus: HTMLElement | null
 }
 
 interface ShowOpts {
-  kind: 'alert' | 'confirm'
+  kind: 'alert' | 'confirm' | 'prompt'
   message: string
   danger?: boolean
   okText?: string
+  placeholder?: string
+  password?: boolean
 }
 
 let queue: DialogReq[] = []
@@ -51,10 +58,10 @@ function ensureHost(): void {
   root.render(<Host />)
 }
 
-/** 显示一个弹窗，返回用户是否“确定”（alert 恒 true） */
-export function showDialog(opts: ShowOpts): Promise<boolean> {
+/** 显示一个弹窗，返回用户是否“确定”（alert 恒 true；prompt 返回输入值或 false） */
+export function showDialog(opts: ShowOpts): Promise<boolean | string> {
   ensureHost()
-  return new Promise<boolean>((resolve) => {
+  return new Promise<boolean | string>((resolve) => {
     const prevFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null
     queue.push({ ...opts, resolve, prevFocus })
@@ -78,10 +85,24 @@ export function uiConfirm(
     message,
     danger: opts?.danger,
     okText: opts?.okText
-  })
+  }) as Promise<boolean>
 }
 
-function finish(ok: boolean): void {
+/** 输入框（确定/取消），返回输入值；取消/关闭返回 null */
+export function uiPrompt(
+  message: string,
+  opts?: { okText?: string; placeholder?: string; password?: boolean }
+): Promise<string | null> {
+  return showDialog({
+    kind: 'prompt',
+    message,
+    okText: opts?.okText,
+    placeholder: opts?.placeholder,
+    password: opts?.password
+  }).then((v) => (typeof v === 'string' ? v : null))
+}
+
+function finish(ok: boolean | string): void {
   const done = current
   current = queue.shift() ?? null
   done?.resolve(ok)
@@ -119,15 +140,34 @@ function Host() {
         </div>
         <div className="dialog-body">
           <p className="confirm-text">{d.message}</p>
+          {d.kind === 'prompt' && (
+            <input
+              className="prompt-input"
+              type={d.password ? 'password' : 'text'}
+              placeholder={d.placeholder}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  finish((e.target as HTMLInputElement).value)
+                }
+              }}
+            />
+          )}
           <div className="confirm-actions">
-            {isConfirm && (
+            {d.kind !== 'alert' && (
               <button className="btn-cancel" onClick={() => finish(false)}>
                 取消
               </button>
             )}
             <button
               className={`btn-primary${d.danger ? ' confirm-danger' : ''}`}
-              onClick={() => finish(true)}
+              onClick={() => {
+                const input = document.querySelector<HTMLInputElement>(
+                  '#zyxterm-ui-dialog-host .prompt-input'
+                )
+                finish(d.kind === 'prompt' ? (input?.value ?? '') : true)
+              }}
             >
               {d.okText ?? (isConfirm ? '确定' : '知道了')}
             </button>

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron'
 import type {
+  ConfigBackupFile,
   ConnectionProfile,
   GlobalMacroStatus,
   GlobalMacroStep,
@@ -47,6 +48,35 @@ const api = {
     toId: string
   ): Promise<ConnectionProfile[]> =>
     ipcRenderer.invoke('profiles:reorder', protocol, fromId, toId),
+  // 配置导入（合并式）：按 id 增量合并，已存在的保留本地，新增的追加
+  mergeProfiles: (
+    profiles: ConnectionProfile[]
+  ): Promise<{
+    profiles: ConnectionProfile[]
+    added: number
+    skipped: number
+  }> => ipcRenderer.invoke('profiles:merge', profiles),
+
+  // ---------- 配置导出/导入 ----------
+  // 导出：用口令整体加密后弹保存对话框写文件
+  exportConfig: (
+    data: unknown,
+    passphrase: string
+  ): Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('config:export', data, passphrase),
+  // 导入第一步：选文件并解析外层信封（密文未解，需再凭口令调用 decryptConfig）
+  importConfig: (): Promise<{
+    ok: boolean
+    canceled?: boolean
+    file?: ConfigBackupFile
+    error?: string
+  }> => ipcRenderer.invoke('config:import'),
+  // 导入第二步：凭口令解密，返回明文配置
+  decryptConfig: (
+    file: ConfigBackupFile,
+    passphrase: string
+  ): Promise<{ ok: boolean; data?: unknown; error?: string }> =>
+    ipcRenderer.invoke('config:decrypt', file, passphrase),
 
   // ---------- 会话 ----------
   createSession: (profile: ConnectionProfile): Promise<SessionInfo> =>
@@ -60,9 +90,17 @@ const api = {
     ipcRenderer.send('terminal:write', id, data),
   terminalResize: (id: string, cols: number, rows: number): void =>
     ipcRenderer.send('terminal:resize', id, cols, rows),
-  onTerminalData: (cb: (id: string, data: string) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, id: string, data: string): void =>
-      cb(id, data)
+  terminalSync: (id: string): Promise<{ seq: number; data: string }> =>
+    ipcRenderer.invoke('terminal:sync', id),
+  onTerminalData: (
+    cb: (id: string, data: string, seq?: number) => void
+  ): (() => void) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      id: string,
+      data: string,
+      seq?: number
+    ): void => cb(id, data, seq)
     ipcRenderer.on('terminal:data', listener)
     return () => {
       ipcRenderer.removeListener('terminal:data', listener)
